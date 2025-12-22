@@ -1,0 +1,36 @@
+{
+  "quote_window": {
+    "enabled": true,
+    "stocks": ["sh600519", "sz000001"],
+    "settings": {
+      "font_size": 14,
+      "background_alpha": 220,
+      "text_alpha": 255,
+      "show_name": true,
+      "show_code": true,
+      "show_column_header": true,
+      "always_on_top": true,
+      "column_widths": [160, 140, 120, 120, 140, 140],
+      "row_height": 44,
+      "window_size": [620, 140],
+      "update_interval": 5
+    },
+    "code_settings": {},
+    "time_schedule": {
+      "enabled": false,
+      "periods": [
+        {"start": "09:25", "end": "11:35"},
+        {"start": "12:55", "end": "15:05"}
+      ]
+    }
+  },
+  "alert": {
+    "enabled": false,
+    "tasks": [],
+    "scan_interval": 20,
+    "dingtalk": {
+      "webhook": "",
+      "secret": ""
+    }
+  }
+}

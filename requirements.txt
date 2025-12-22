@@ -1,0 +1,6 @@
+PyQt6>=6.6
+requests>=2.32
+pandas>=2.0
+akshare>=1.10
+chinesecalendar>=1.9
+pyinstaller>=6.0
