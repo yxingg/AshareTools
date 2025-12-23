@@ -227,4 +227,4 @@ This tool is for learning and personal use only. Market data comes from public i
 
 ## License
 
-MIT License
+This project is licensed under the [MIT License](LICENSE).

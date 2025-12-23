@@ -227,4 +227,4 @@ A: 确保 `strategies.py` 文件在 EXE 同目录。
 
 ## License
 
-MIT License
+本项目采用 [MIT License](LICENSE) 开源授权。
