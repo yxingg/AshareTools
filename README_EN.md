@@ -135,23 +135,8 @@ pip install pyinstaller
 
 ### 2. Execute Packaging
 
-**Method 1: Use spec file (Recommended)**
-
 ```powershell
 pyinstaller AShareTools.spec
-```
-
-**Method 2: Command Line Packaging**
-
-```powershell
-pyinstaller --onefile --noconsole --name AShareTools ^
-    --hidden-import PyQt6.sip ^
-    --hidden-import pandas ^
-    --hidden-import akshare ^
-    --hidden-import chinese_calendar ^
-    --collect-all PyQt6 ^
-    --strip --clean --noconfirm ^
-    src/main.py
 ```
 
 ### 3. Packaged File Structure
@@ -163,6 +148,7 @@ dist/
 Files required in the same directory for deployment:
   strategies.py      # Strategy definition file (Required, supports hot reload)
   settings.json      # Configuration file (Automatically created on first run)
+  icon.ico           # (Optional) Custom icon file
   
 Automatically generated at runtime:
   asharetools.log    # Log file
@@ -180,6 +166,7 @@ Automatically generated at runtime:
 - `strategies.py` must be in the same directory as the EXE, otherwise strategies cannot be loaded
 - `settings.json` and log files will be automatically created in the same directory as the EXE
 - Stock names will be automatically fetched and cached on first run
+- The program has a built-in default icon. To customize it, place an `icon.ico` file in the same directory as the EXE (prioritized).
 
 ## Project Structure
 

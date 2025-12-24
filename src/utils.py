@@ -2,7 +2,21 @@
 """通用工具函数模块"""
 
 import re
+import sys
+from pathlib import Path
 from typing import Optional, List, Iterator
+
+
+def get_resource_path(relative_path: str) -> Path:
+    """
+    获取资源文件的绝对路径
+    支持开发环境和 PyInstaller 打包环境
+    """
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller 打包后的临时目录
+        return Path(sys._MEIPASS) / relative_path
+    # 开发环境: 假设 utils.py 在 src/ 目录下，资源文件在项目根目录
+    return Path(__file__).resolve().parent.parent / relative_path
 
 
 def normalize_stock_code(raw: str) -> Optional[str]:

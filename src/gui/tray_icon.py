@@ -71,8 +71,9 @@ class SystemTrayIcon(QSystemTrayIcon):
     def _create_icon(self):
         """创建托盘图标"""
         from ..config import ICON_PATH
+        from ..utils import get_resource_path
         
-        # 1. 尝试从本地文件加载
+        # 1. 尝试从本地文件加载 (用户自定义图标)
         if ICON_PATH.exists():
             icon = QIcon(str(ICON_PATH))
             if not icon.isNull():
@@ -81,10 +82,20 @@ class SystemTrayIcon(QSystemTrayIcon):
                 self.activated.connect(self._on_activated)
                 return
 
-        # 2. 尝试使用内置图标
+        # 2. 尝试从打包资源中加载
+        resource_icon = get_resource_path("icon.ico")
+        if resource_icon.exists():
+            icon = QIcon(str(resource_icon))
+            if not icon.isNull():
+                self.setIcon(icon)
+                self.setToolTip("AShareTools - A股行情监控")
+                self.activated.connect(self._on_activated)
+                return
+
+        # 3. 尝试使用内置图标
         icon = QIcon.fromTheme("stock")
         
-        # 3. 如果都没有，则绘制并保存
+        # 3. 如果都没有，则绘制
         if icon.isNull():
             # 创建一个简单的彩色图标
             from PyQt6.QtGui import QPixmap, QPainter, QColor
@@ -99,12 +110,6 @@ class SystemTrayIcon(QSystemTrayIcon):
             painter.drawRect(18, 12, 10, 16)
             painter.end()
             
-            # 保存到本地，供下次使用
-            try:
-                pixmap.save(str(ICON_PATH), "PNG")
-            except Exception as e:
-                logger.warning(f"保存图标失败: {e}")
-                
             icon = QIcon(pixmap)
         
         self.setIcon(icon)

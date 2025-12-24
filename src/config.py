@@ -19,7 +19,7 @@ SETTINGS_PATH = BASE_DIR / "settings.json"
 LOG_PATH = BASE_DIR / "asharetools.log"
 STRATEGIES_FILE = BASE_DIR / "strategies.py"  # 策略定义文件
 STOCK_CACHE_FILE = BASE_DIR / "stock_names.json"  # 股票名称缓存
-ICON_PATH = BASE_DIR / "icon.png"  # 程序图标
+ICON_PATH = BASE_DIR / "icon.ico"  # 程序图标
 
 # ================= 钉钉机器人配置 =================
 # 请在钉钉机器人安全设置中勾选"自定义关键词"，并添加关键词 "交易提醒"

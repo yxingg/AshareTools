@@ -135,23 +135,8 @@ pip install pyinstaller
 
 ### 2. 执行打包
 
-**方式一：使用 spec 文件（推荐）**
-
 ```powershell
 pyinstaller AShareTools.spec
-```
-
-**方式二：命令行打包**
-
-```powershell
-pyinstaller --onefile --noconsole --name AShareTools ^
-    --hidden-import PyQt6.sip ^
-    --hidden-import pandas ^
-    --hidden-import akshare ^
-    --hidden-import chinese_calendar ^
-    --collect-all PyQt6 ^
-    --strip --clean --noconfirm ^
-    src/main.py
 ```
 
 ### 3. 打包后的文件结构
@@ -163,6 +148,7 @@ dist/
 部署时需要将以下文件放在 EXE 同目录:
   strategies.py      # 策略定义文件（必需，支持热重载）
   settings.json      # 配置文件（首次运行自动创建）
+  icon.ico           # （可选）自定义图标文件
   
 运行时自动生成:
   asharetools.log    # 日志文件
@@ -180,6 +166,7 @@ dist/
 - `strategies.py` 必须放在 EXE 同目录，否则无法加载策略
 - `settings.json` 和日志文件会自动在 EXE 同目录创建
 - 首次运行时会自动获取股票名称并缓存
+- 程序内置了默认图标，如需自定义，请在 EXE 同目录放置 `icon.ico` 文件（优先使用）
 
 ## 项目结构
 
