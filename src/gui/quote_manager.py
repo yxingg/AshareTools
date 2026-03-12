@@ -29,7 +29,7 @@ class QuoteWindowManager:
     
     def __init__(self, on_settings_changed=None, on_visibility_changed=None):
         self.fetcher = QuoteFetcher()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
+        self.executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
         
         # 股票列表和设置
         self.codes: List[str] = []
@@ -114,6 +114,8 @@ class QuoteWindowManager:
 
     def start(self):
         """启动行情刷新"""
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
         self._ensure_windows(initial=True)
         if self.codes:
             self.refresh_quotes(force=True)
@@ -122,6 +124,10 @@ class QuoteWindowManager:
     def stop(self):
         """停止行情刷新"""
         self.fetch_timer.stop()
+        self._force_refresh_requested = False
+        if self.executor:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = None
 
     def show_windows(self):
         """显示所有窗口"""
@@ -432,6 +438,8 @@ class QuoteWindowManager:
             return
         self.fetch_in_progress = True
         self._force_refresh_requested = False
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
         self.executor.submit(self._fetch_worker, list(self.codes))
 
     def _fetch_worker(self, codes: List[str]) -> None:
@@ -439,10 +447,9 @@ class QuoteWindowManager:
         try:
             quotes = self.fetcher.fetch(codes)
             # 在主线程更新
-            QApplication.instance().postEvent(
-                QApplication.instance(),
-                _QuoteUpdateEvent(quotes)
-            )
+            app = QApplication.instance()
+            if app is not None:
+                app.postEvent(app, _QuoteUpdateEvent(quotes))
         except Exception as e:
             logger.warning(f"获取行情失败: {e}")
         finally:

@@ -156,15 +156,27 @@ class AShareToolsApp(QApplication):
         """退出时的清理"""
         self.logger.info("AShareTools 正在退出...")
         try:
+            # 先停止定时刷新与后台抓取线程
             self.quote_manager.stop()
+        except Exception as e:
+            self.logger.error(f"停止行情模块失败: {e}")
+
+        try:
+            # 再停止预警循环线程
             self.alert_engine.stop()
+        except Exception as e:
+            self.logger.error(f"停止预警模块失败: {e}")
+
+        try:
+            # 隐藏托盘图标，避免残留
+            self.tray_icon.hide()
+        except Exception as e:
+            self.logger.warning(f"隐藏托盘图标失败: {e}")
+
+        try:
             self.settings_manager.save()
         except Exception as e:
             self.logger.error(f"退出清理失败: {e}")
-        finally:
-            # 强制退出进程，防止因线程残留导致进程无法结束
-            import os
-            os._exit(0)
 
     def event(self, event: QEvent) -> bool:
         """处理自定义事件"""

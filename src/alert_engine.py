@@ -7,14 +7,12 @@
 import logging
 import time
 import importlib.util
-import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Any, Callable
 
 from .config import (
-    BASE_DIR, STRATEGIES_FILE, STOCK_CACHE_FILE,
-    DEFAULT_SCAN_INTERVAL, DEFAULT_MAX_WORKERS, AVAILABLE_DATA_SOURCES
+    STRATEGIES_FILE,
+    DEFAULT_SCAN_INTERVAL, AVAILABLE_DATA_SOURCES
 )
 from .data_fetcher import KLineFetcher, StockNameManager
 from .indicators import calculate_indicators
@@ -129,7 +127,7 @@ class AlertEngine:
         # 运行状态
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._stop_event = threading.Event()
 
     def update_tasks(self, tasks: List[Dict], scan_interval: int = None):
         """
@@ -231,8 +229,8 @@ class AlertEngine:
             self.logger.info("没有预警任务，跳过启动")
             return
         
+        self._stop_event.clear()
         self._running = True
-        self._executor = ThreadPoolExecutor(max_workers=min(DEFAULT_MAX_WORKERS, len(self.tasks) + 3))
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         self.logger.info("预警引擎已启动")
@@ -251,10 +249,18 @@ class AlertEngine:
 
     def stop(self):
         """停止预警引擎"""
+        if not self._running and self._thread is None:
+            return
+
         self._running = False
-        if self._executor:
-            self._executor.shutdown(wait=False)
-            self._executor = None
+        self._stop_event.set()
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+            if self._thread.is_alive():
+                self.logger.warning("预警线程未在超时时间内退出")
+        self._thread = None
+
         self.logger.info("预警引擎已停止")
         # 注意：关闭预警时不推送任何消息
 
@@ -293,9 +299,8 @@ class AlertEngine:
                     sleep_sec, _, _ = self.scheduler.calculate_sleep_seconds()
                     # 分段休眠，以便能够响应停止信号
                     for _ in range(int(min(sleep_sec, 60))):  # 最多休眠60秒后重新检查
-                        if not self._running:
+                        if not self._running or self._stop_event.wait(timeout=1):
                             return
-                        time.sleep(1)
                     continue
                 
                 # 执行一轮扫描
@@ -303,13 +308,13 @@ class AlertEngine:
                 
                 # 休眠
                 for _ in range(self.scan_interval):
-                    if not self._running:
+                    if not self._running or self._stop_event.wait(timeout=1):
                         return
-                    time.sleep(1)
                     
             except Exception as e:
                 self.logger.error(f"预警循环异常: {e}")
-                time.sleep(5)
+                if self._stop_event.wait(timeout=5):
+                    return
 
     def _scan_once(self):
         """执行一轮扫描"""
