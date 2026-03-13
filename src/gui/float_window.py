@@ -36,7 +36,7 @@ class StockFloatWindow(QWidget):
 
         self._moving = False
         self._move_offset: Optional[QPoint] = None
-        self._resize_mode = "center"
+        self._resize_mode = ""
         self._resize_origin: Optional[QPoint] = None
         self._resize_geometry: Optional[QRect] = None
 
@@ -44,13 +44,14 @@ class StockFloatWindow(QWidget):
         self._neutral_color = QColor(230, 230, 230)
         self._up_color = QColor(217, 48, 80)
         self._down_color = QColor(0, 158, 96)
+        self._always_on_top = True  # 单窗口置顶设置
         self._initializing = True  # 标志：初始化中不同步设置
 
         self.table = QTableWidget(1, COLUMN_COUNT, self)
         self.table.setHorizontalHeaderLabels(COLUMN_HEADERS)
         self.table.setVerticalHeaderLabels([""])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -87,7 +88,7 @@ class StockFloatWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
         )
-        if self.manager.always_on_top:
+        if self._always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowFlags(flags)
@@ -96,7 +97,7 @@ class StockFloatWindow(QWidget):
 
     def apply_settings(self, config: Dict[str, Any], *, initial: bool) -> None:
         """应用设置"""
-        self._initializing = initial  # 初始化时不同步设置
+        self._initializing = True  # 应用设置时不同步
         self._bg_color = config["background_color"]
         self._neutral_color = config["neutral_color"]
         self._up_color = config["up_color"]
@@ -166,6 +167,7 @@ class StockFloatWindow(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, self.code)
             item.setForeground(QBrush(self._color_for_quote(quote)))
         self.setWindowTitle(values[0] if values[0] and values[0] != "--" else self.code)
+        self.update()  # 半透明窗口需要显式触发重绘
 
     def _color_for_quote(self, quote) -> QColor:
         """根据涨跌返回颜色"""
@@ -206,6 +208,57 @@ class StockFloatWindow(QWidget):
     def get_window_size(self) -> tuple:
         return (self.width(), self.height())
 
+    # === 边缘拉伸调整窗口大小 ===
+
+    _EDGE_CURSORS = {
+        'left': Qt.CursorShape.SizeHorCursor,
+        'right': Qt.CursorShape.SizeHorCursor,
+        'top': Qt.CursorShape.SizeVerCursor,
+        'bottom': Qt.CursorShape.SizeVerCursor,
+        'top-left': Qt.CursorShape.SizeFDiagCursor,
+        'bottom-right': Qt.CursorShape.SizeFDiagCursor,
+        'top-right': Qt.CursorShape.SizeBDiagCursor,
+        'bottom-left': Qt.CursorShape.SizeBDiagCursor,
+    }
+
+    def _edge_at(self, local_pos: QPoint) -> str:
+        """检测鼠标是否在窗口边缘，返回边缘标识"""
+        m = self.RESIZE_MARGIN
+        x, y = local_pos.x(), local_pos.y()
+        w, h = self.width(), self.height()
+        on_left = x < m
+        on_right = x >= w - m
+        on_top = y < m
+        on_bottom = y >= h - m
+        if on_top and on_left: return 'top-left'
+        if on_top and on_right: return 'top-right'
+        if on_bottom and on_left: return 'bottom-left'
+        if on_bottom and on_right: return 'bottom-right'
+        if on_left: return 'left'
+        if on_right: return 'right'
+        if on_top: return 'top'
+        if on_bottom: return 'bottom'
+        return ''
+
+    def _do_resize(self, global_pos: QPoint) -> None:
+        """执行窗口拉伸"""
+        if not self._resize_origin or not self._resize_geometry:
+            return
+        diff = global_pos - self._resize_origin
+        geo = QRect(self._resize_geometry)
+        if 'left' in self._resize_mode:
+            geo.setLeft(geo.left() + diff.x())
+        if 'right' in self._resize_mode:
+            geo.setRight(geo.right() + diff.x())
+        if 'top' in self._resize_mode:
+            geo.setTop(geo.top() + diff.y())
+        if 'bottom' in self._resize_mode:
+            geo.setBottom(geo.bottom() + diff.y())
+        min_w = max(self.minimumWidth(), 50)
+        min_h = max(self.minimumHeight(), 20)
+        if geo.width() >= min_w and geo.height() >= min_h:
+            self.setGeometry(geo)
+
     def _refresh_style(self) -> None:
         bg = color_to_rgba(self._bg_color)
         fg = color_to_rgba(self._neutral_color)
@@ -231,6 +284,34 @@ class StockFloatWindow(QWidget):
 
     def _show_context_menu(self, point) -> None:
         menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background-color: rgba(255, 255, 255, 200);"
+            "  border: 1px solid rgba(0, 0, 0, 20);"
+            "  border-radius: 8px;"
+            "  padding: 2px 0;"
+            "}"
+            "QMenu::item {"
+            "  padding: 5px 36px 5px 16px;"
+            "  color: rgba(30, 30, 30, 255);"
+            "  border-radius: 4px;"
+            "  margin: 1px 4px;"
+            "}"
+            "QMenu::item:selected {"
+            "  background-color: rgba(0, 0, 0, 15);"
+            "}"
+            "QMenu::item:disabled {"
+            "  color: rgba(140, 140, 140, 200);"
+            "}"
+            "QMenu::separator {"
+            "  height: 1px;"
+            "  background-color: rgba(0, 0, 0, 15);"
+            "  margin: 3px 12px;"
+            "}"
+            "QMenu::indicator {"
+            "  width: 16px; height: 16px; margin-left: 6px;"
+            "}"
+        )
         self.manager.populate_context_menu(menu, self, self.code)
         menu.exec(self.mapToGlobal(point))
 
@@ -243,16 +324,60 @@ class StockFloatWindow(QWidget):
             self.manager.sync_from_window(self)
 
     def eventFilter(self, obj, event) -> bool:
+        # 表头事件：优先让表头处理列宽拖拽
+        if obj == self.table.horizontalHeader():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    if self.table.horizontalHeader().cursor().shape() == Qt.CursorShape.SplitHCursor:
+                        return False  # 交给表头处理列宽调整
+                    local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+                    edge = self._edge_at(local_pos)
+                    if edge:
+                        self._resize_mode = edge
+                        self._resize_origin = event.globalPosition().toPoint()
+                        self._resize_geometry = QRect(self.geometry())
+                        return True
+                    self._moving = True
+                    self._move_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    return True
+
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
+                local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+                edge = self._edge_at(local_pos)
+                if edge:
+                    self._resize_mode = edge
+                    self._resize_origin = event.globalPosition().toPoint()
+                    self._resize_geometry = QRect(self.geometry())
+                    return True
                 self._moving = True
                 self._move_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                 return True
         elif event.type() == QEvent.Type.MouseMove:
-            if self._moving and self._move_offset:
-                self.move(event.globalPosition().toPoint() - self._move_offset)
+            global_pos = event.globalPosition().toPoint()
+            if self._resize_mode and self._resize_origin:
+                self._do_resize(global_pos)
                 return True
+            if self._moving and self._move_offset:
+                self.move(global_pos - self._move_offset)
+                return True
+            # 悬停时更新鼠标光标
+            local_pos = self.mapFromGlobal(global_pos)
+            edge = self._edge_at(local_pos)
+            cursor_shape = self._EDGE_CURSORS.get(edge)
+            if cursor_shape:
+                self.setCursor(cursor_shape)
+                obj.setCursor(cursor_shape)
+            else:
+                self.unsetCursor()
+                obj.unsetCursor()
         elif event.type() == QEvent.Type.MouseButtonRelease:
+            if self._resize_mode:
+                self._resize_mode = ""
+                self._resize_origin = None
+                self._resize_geometry = None
+                self.manager.sync_from_window(self)
+                return True
             self._moving = False
             self._move_offset = None
             self.manager.sync_from_window(self)
@@ -260,14 +385,31 @@ class StockFloatWindow(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            local_pos = event.position().toPoint()
+            edge = self._edge_at(local_pos)
+            if edge:
+                self._resize_mode = edge
+                self._resize_origin = event.globalPosition().toPoint()
+                self._resize_geometry = QRect(self.geometry())
+                return
             self._moving = True
             self._move_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
+        global_pos = event.globalPosition().toPoint()
+        if self._resize_mode and self._resize_origin:
+            self._do_resize(global_pos)
+            return
         if self._moving and self._move_offset:
-            self.move(event.globalPosition().toPoint() - self._move_offset)
+            self.move(global_pos - self._move_offset)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._resize_mode:
+            self._resize_mode = ""
+            self._resize_origin = None
+            self._resize_geometry = None
+            self.manager.sync_from_window(self)
+            return
         self._moving = False
         self._move_offset = None
         self.manager.sync_from_window(self)

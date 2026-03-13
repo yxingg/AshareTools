@@ -4,7 +4,7 @@
 import re
 import sys
 from pathlib import Path
-from typing import Optional, List, Iterator
+from typing import Optional, Iterator
 
 
 def get_resource_path(relative_path: str) -> Path:

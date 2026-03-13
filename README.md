@@ -187,9 +187,11 @@ AShareTools/
 │   └── gui/
 │       ├── __init__.py
 │       ├── float_window.py  # 浮动窗口
+│       ├── main_window.py   # 主设置窗口
 │       ├── quote_manager.py # 行情管理
+│       ├── toggle_switch.py # 开关控件
 │       ├── tray_icon.py     # 系统托盘
-│       └── dialogs.py       # 对话框
+│       └── win11_style.py   # Win11风格
 ├── strategies.py            # 策略定义（热重载）
 ├── settings.json            # 运行配置（自动生成）
 ├── requirements.txt         # 依赖列表

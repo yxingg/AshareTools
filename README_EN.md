@@ -187,9 +187,11 @@ AShareTools/
 │   └── gui/
 │       ├── __init__.py
 │       ├── float_window.py  # Floating Window
+│       ├── main_window.py   # Settings Window
 │       ├── quote_manager.py # Quote Manager
+│       ├── toggle_switch.py # Toggle Control
 │       ├── tray_icon.py     # System Tray
-│       └── dialogs.py       # Dialogs
+│       └── win11_style.py   # Win11 Style
 ├── strategies.py            # Strategy Definitions (Hot Reload)
 ├── settings.json            # Runtime Config (Auto-generated)
 ├── requirements.txt         # Dependencies

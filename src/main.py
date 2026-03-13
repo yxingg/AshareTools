@@ -7,7 +7,6 @@ AShareTools - A股行情监控与预警工具
 from __future__ import annotations
 
 import sys
-import logging
 import ctypes
 from pathlib import Path
 
@@ -25,7 +24,7 @@ _setup_path()
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QEvent
 
-from src.config import LOG_PATH, STOCK_CACHE_FILE
+from src.config import STOCK_CACHE_FILE
 from src.logger import setup_logger
 from src.settings_manager import SettingsManager
 from src.alert_engine import AlertEngine
@@ -44,6 +43,10 @@ class AShareToolsApp(QApplication):
     
     def __init__(self, argv):
         super().__init__(argv)
+        
+        # 应用 Win11 风格
+        from src.gui.win11_style import apply_win11_style
+        apply_win11_style(self)
         
         # 配置日志
         self.logger, self.notifier = _configure_logging()
@@ -180,8 +183,8 @@ class AShareToolsApp(QApplication):
 
     def event(self, event: QEvent) -> bool:
         """处理自定义事件"""
-        if isinstance(event, _QuoteUpdateEvent):
-            self.quote_manager.on_quotes_received(event.quotes)
+        if event.type() == _QuoteUpdateEvent.EVENT_TYPE:
+            self.quote_manager.on_quotes_received()
             return True
         return super().event(event)
 

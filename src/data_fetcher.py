@@ -8,7 +8,6 @@
 import dataclasses
 import logging
 import time
-import contextlib
 from typing import List, Optional, Sequence, Dict, Any
 
 import requests
@@ -17,28 +16,6 @@ from requests.exceptions import RequestException, SSLError
 
 from .utils import normalize_stock_code, split_text, get_market_prefix
 
-
-@contextlib.contextmanager
-def suppress_tqdm():
-    """
-    临时抑制 tqdm 进度条输出
-    通过 monkey patch akshare.utils.tqdm.get_tqdm 来禁用进度条
-    """
-    try:
-        from akshare.utils import tqdm as ak_tqdm
-        original_get_tqdm = ak_tqdm.get_tqdm
-        
-        # 替换为返回透传迭代器的函数
-        ak_tqdm.get_tqdm = lambda enable=True: (lambda iterable, *args, **kwargs: iterable)
-        
-        yield
-    except ImportError:
-        yield
-    finally:
-        try:
-            ak_tqdm.get_tqdm = original_get_tqdm
-        except (NameError, UnboundLocalError):
-            pass
 
 logger = logging.getLogger(__name__)
 

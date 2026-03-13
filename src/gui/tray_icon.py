@@ -2,7 +2,7 @@
 """系统托盘图标模块"""
 
 import logging
-from typing import Callable, Optional
+from typing import Optional
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon, QAction
@@ -10,11 +10,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QMenu,
     QSystemTrayIcon,
-    QMessageBox,
-    QInputDialog,
 )
 
-from .dialogs import AlertConfigDialog, TimeScheduleDialog, AddStockDialog
 from .main_window import MainWindow
 from ..scheduler import TradingScheduler
 
@@ -209,69 +206,6 @@ class SystemTrayIcon(QSystemTrayIcon):
         self.show_quote_action.setChecked(checked)
         self.settings_manager.set_quote_enabled(checked)
 
-    def _add_quote_stock(self):
-        """添加行情股票"""
-        dialog = AddStockDialog()
-        if dialog.exec():
-            code = dialog.get_code()
-            if code:
-                self.quote_manager.add_code(code)
-
-    def _set_quote_option(self, option: str, value: bool):
-        """设置行情窗口选项"""
-        if option == 'show_name':
-            self.quote_manager.set_show_name(value)
-        elif option == 'show_code':
-            self.quote_manager.set_show_code(value)
-        elif option == 'show_column_header':
-            self.quote_manager.set_show_column_header(value)
-        elif option == 'always_on_top':
-            self.quote_manager.set_always_on_top(value)
-
-    def _prompt_font_size(self):
-        """设置字体大小"""
-        value, ok = QInputDialog.getInt(
-            None, "字体大小", "字号:", 
-            self.quote_manager.font_size, 8, 48, 1
-        )
-        if ok:
-            self.quote_manager.font_size = value
-            self.quote_manager._apply_settings_to_all()
-            self.quote_manager._notify_settings_changed()
-
-    def _prompt_bg_alpha(self):
-        """设置背景透明度"""
-        value, ok = QInputDialog.getInt(
-            None, "背景透明度", "0-255:", 
-            self.quote_manager.background_alpha, 0, 255, 1
-        )
-        if ok:
-            self.quote_manager.background_alpha = value
-            self.quote_manager._apply_settings_to_all()
-            self.quote_manager._notify_settings_changed()
-
-    def _prompt_text_alpha(self):
-        """设置文字透明度"""
-        value, ok = QInputDialog.getInt(
-            None, "文字透明度", "0-255:", 
-            self.quote_manager.text_alpha, 0, 255, 1
-        )
-        if ok:
-            self.quote_manager.text_alpha = value
-            self.quote_manager._apply_settings_to_all()
-            self.quote_manager._notify_settings_changed()
-
-    def _prompt_refresh_interval(self):
-        """设置刷新频率"""
-        value, ok = QInputDialog.getInt(
-            None, "刷新频率", "秒:", 
-            self.quote_manager.update_interval, 1, 3600, 1
-        )
-        if ok:
-            self.quote_manager.update_interval = value
-            self.quote_manager.fetch_timer.setInterval(value * 1000)
-            self.quote_manager._notify_settings_changed()
-
     def _toggle_time_schedule(self, checked):
         """切换定时显示"""
         self.settings_manager.set_time_schedule_enabled(checked)
@@ -279,14 +213,6 @@ class SystemTrayIcon(QSystemTrayIcon):
             # 启用定时显示时，重置状态，并立即检查
             self._last_period_state = None
             self._check_time_schedule()
-
-    def _show_time_schedule_dialog(self):
-        """显示时间段设置对话框"""
-        periods = self.settings_manager.get_time_schedule_periods()
-        dialog = TimeScheduleDialog(periods=periods)
-        if dialog.exec():
-            new_periods = dialog.get_periods()
-            self.settings_manager.set_time_schedule_periods(new_periods)
 
     def _check_time_schedule(self):
         """检查时间段"""
@@ -337,59 +263,6 @@ class SystemTrayIcon(QSystemTrayIcon):
             self.alert_engine.stop()
         
         self.settings_manager.set_alert_enabled(checked)
-
-    def _show_alert_config_dialog(self):
-        """显示预警配置对话框"""
-        tasks = self.settings_manager.get_alert_tasks()
-        scan_interval = self.settings_manager.get_alert_scan_interval()
-        strategies = self.alert_engine.get_available_strategies()
-        dingtalk = self.settings_manager.get_dingtalk_config()
-        
-        dialog = AlertConfigDialog(
-            tasks=tasks,
-            available_strategies=strategies,
-            scan_interval=scan_interval,
-            dingtalk_config=dingtalk
-        )
-        
-        if dialog.exec():
-            new_tasks = dialog.get_tasks()
-            new_interval = dialog.get_scan_interval()
-            new_dingtalk = dialog.get_dingtalk_config()
-            
-            self.settings_manager.set_alert_tasks(new_tasks)
-            self.settings_manager.set_alert_scan_interval(new_interval)
-            self.settings_manager.set_dingtalk_config(new_dingtalk)
-            
-            # 如果预警已启用，更新配置
-            if self.alert_engine.is_running():
-                self.alert_engine.update_tasks(new_tasks, new_interval)
-                if self.alert_engine.notifier:
-                    self.alert_engine.notifier.update_config(
-                        new_dingtalk.get('webhook', ''),
-                        new_dingtalk.get('secret', '')
-                    )
-
-    def _reload_strategies(self):
-        """重载策略"""
-        success = self.alert_engine.reload_strategies()
-        if success:
-            self.showMessage(
-                "策略重载",
-                "策略文件重载成功！",
-                QSystemTrayIcon.MessageIcon.Information,
-                2000
-            )
-            # 如果设置窗口已打开，刷新其策略列表
-            if self.main_window and self.main_window.isVisible():
-                self.main_window._reload_strategies_ui_only()
-        else:
-            self.showMessage(
-                "策略重载",
-                "策略文件重载失败，请检查文件格式。",
-                QSystemTrayIcon.MessageIcon.Warning,
-                3000
-            )
 
     def _quit(self):
         """退出程序"""

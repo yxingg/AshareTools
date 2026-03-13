@@ -3,18 +3,12 @@
 
 from .float_window import StockFloatWindow
 from .quote_manager import QuoteWindowManager
-from .dialogs import (
-    AlertConfigDialog,
-    TimeScheduleDialog,
-    AddStockDialog,
-)
 from .main_window import MainWindow
+from .win11_style import apply_win11_style
 
 __all__ = [
     'StockFloatWindow',
     'QuoteWindowManager',
-    'AlertConfigDialog',
-    'TimeScheduleDialog',
-    'AddStockDialog',
     'MainWindow',
+    'apply_win11_style',
 ]

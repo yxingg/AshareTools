@@ -8,7 +8,7 @@ import logging
 import time
 import importlib.util
 import threading
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Callable
 
 from .config import (
     STRATEGIES_FILE,

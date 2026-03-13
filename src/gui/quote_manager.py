@@ -2,23 +2,21 @@
 """行情窗口管理器"""
 
 import logging
+import queue
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QInputDialog,
     QMenu,
-    QMessageBox,
     QWidget,
 )
 
-from ..constants import COLUMN_COUNT, DEFAULT_WINDOW_CONFIG
 from ..data_fetcher import QuoteFetcher, StockQuote
-from ..utils import normalize_stock_code, color_to_rgba
+from ..utils import normalize_stock_code
 from .float_window import StockFloatWindow
 
 logger = logging.getLogger(__name__)
@@ -65,6 +63,9 @@ class QuoteWindowManager:
         self.on_settings_changed = on_settings_changed
         self.on_visibility_changed = on_visibility_changed  # 窗口可见性变化回调
         
+        # 跨线程数据队列
+        self._quote_queue: queue.Queue[List[StockQuote]] = queue.Queue()
+
         # 刷新定时器
         self.fetch_timer = QTimer()
         self.fetch_timer.setInterval(self.update_interval * 1000)
@@ -203,17 +204,24 @@ class QuoteWindowManager:
         for code in self.codes:
             if code not in self.windows:
                 window = StockFloatWindow(self, code)
+                # 恢复单窗口置顶设置
+                code_cfg = self.code_settings.get(code, {})
+                window._always_on_top = code_cfg.get('always_on_top', self.always_on_top)
                 window.apply_settings(config, initial=initial)
                 window.update_quote(self.quotes.get(code))
                 
-                # 恢复窗口位置和大小
-                code_cfg = self.code_settings.get(code, {})
+                # 恢复窗口位置、大小、列宽（抑制同步）
+                window._initializing = True
                 if 'window_pos' in code_cfg:
                     pos = code_cfg['window_pos']
                     window.move(pos[0], pos[1])
                 if 'window_size' in code_cfg:
                     size = code_cfg['window_size']
                     window.resize(size[0], size[1])
+                if 'column_widths' in code_cfg:
+                    for i, w in enumerate(code_cfg['column_widths']):
+                        window.table.setColumnWidth(i, w)
+                window._initializing = False
                 
                 if self._visible:
                     window.show()
@@ -273,8 +281,9 @@ class QuoteWindowManager:
 
         top_action = menu.addAction("始终置顶")
         top_action.setCheckable(True)
-        top_action.setChecked(self.always_on_top)
-        top_action.triggered.connect(lambda checked: self.set_always_on_top(checked))
+        window = self.windows.get(code)
+        top_action.setChecked(window._always_on_top if window else self.always_on_top)
+        top_action.triggered.connect(lambda checked, c=code: self.set_window_always_on_top(c, checked))
 
         menu.addSeparator()
 
@@ -396,10 +405,25 @@ class QuoteWindowManager:
         self._notify_settings_changed()
 
     def set_always_on_top(self, value: bool) -> None:
-        if self.always_on_top == value:
-            return
         self.always_on_top = value
+        # 全局设置更新所有窗口
+        for code, window in self.windows.items():
+            window._always_on_top = value
+            if code not in self.code_settings:
+                self.code_settings[code] = {}
+            self.code_settings[code]['always_on_top'] = value
         self._apply_settings_to_all()
+        self._notify_settings_changed()
+
+    def set_window_always_on_top(self, code: str, value: bool) -> None:
+        """设置单个窗口的置顶状态"""
+        if code not in self.code_settings:
+            self.code_settings[code] = {}
+        self.code_settings[code]['always_on_top'] = value
+        window = self.windows.get(code)
+        if window:
+            window._always_on_top = value
+            window._apply_flags(show=window.isVisible())
         self._notify_settings_changed()
 
     def auto_fit_code(self, code: str) -> None:
@@ -419,12 +443,13 @@ class QuoteWindowManager:
         self.row_height = window.get_row_height()
         self.window_size = window.get_window_size()
         
-        # 保存窗口位置和大小到code_settings
+        # 保存窗口位置、大小和列宽到code_settings
         code = window.code
         if code not in self.code_settings:
             self.code_settings[code] = {}
         self.code_settings[code]['window_pos'] = [window.x(), window.y()]
         self.code_settings[code]['window_size'] = list(window.get_window_size())
+        self.code_settings[code]['column_widths'] = window.get_column_widths()
         
         self._notify_settings_changed()
 
@@ -446,10 +471,11 @@ class QuoteWindowManager:
         """获取行情的工作线程"""
         try:
             quotes = self.fetcher.fetch(codes)
-            # 在主线程更新
+            # 数据放入线程安全队列，事件仅做通知
+            self._quote_queue.put(quotes)
             app = QApplication.instance()
             if app is not None:
-                app.postEvent(app, _QuoteUpdateEvent(quotes))
+                app.postEvent(app, _QuoteUpdateEvent())
         except Exception as e:
             logger.warning(f"获取行情失败: {e}")
         finally:
@@ -457,12 +483,17 @@ class QuoteWindowManager:
             if self._force_refresh_requested:
                 self.refresh_quotes(force=True)
 
-    def on_quotes_received(self, quotes: List[StockQuote]) -> None:
-        """收到行情数据"""
-        for quote in quotes:
-            self.quotes[quote.code] = quote
-            if quote.code in self.windows:
-                self.windows[quote.code].update_quote(quote)
+    def on_quotes_received(self) -> None:
+        """收到行情数据，从队列中读取"""
+        while not self._quote_queue.empty():
+            try:
+                quotes = self._quote_queue.get_nowait()
+            except queue.Empty:
+                break
+            for quote in quotes:
+                self.quotes[quote.code] = quote
+                if quote.code in self.windows:
+                    self.windows[quote.code].update_quote(quote)
 
 
 # 自定义事件用于跨线程通信
@@ -470,7 +501,6 @@ from PyQt6.QtCore import QEvent
 
 class _QuoteUpdateEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
-    
-    def __init__(self, quotes):
+
+    def __init__(self):
         super().__init__(self.EVENT_TYPE)
-        self.quotes = quotes

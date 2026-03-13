@@ -4,7 +4,6 @@
 运行时配置（股票列表、预警任务等）保存在 settings.json 中。
 """
 import sys
-import os
 from pathlib import Path
 
 # ================= 路径配置 =================
