@@ -29,6 +29,7 @@ from src.logger import setup_logger
 from src.settings_manager import SettingsManager
 from src.alert_engine import AlertEngine
 from src.gui.quote_manager import QuoteWindowManager, _QuoteUpdateEvent
+from src.gui.gold_manager import GoldWindowManager, _GoldUpdateEvent
 from src.gui.tray_icon import SystemTrayIcon
 from src.data_fetcher import StockNameManager
 
@@ -61,7 +62,11 @@ class AShareToolsApp(QApplication):
         # 初始化全局股票信息缓存管理器
         quote_stocks = self.settings_manager.get_quote_stocks()
         alert_tasks = self.settings_manager.get_alert_tasks()
-        alert_symbols = [t.get('symbol', '') for t in alert_tasks if t.get('symbol')]
+        alert_symbols = [
+            t.get('symbol', '')
+            for t in alert_tasks
+            if t.get('symbol') and bool(t.get('enabled', True))
+        ]
         all_symbols = list(set(quote_stocks + alert_symbols))
         
         self.stock_name_manager = StockNameManager(
@@ -76,6 +81,25 @@ class AShareToolsApp(QApplication):
             on_visibility_changed=self._on_quote_visibility_changed
         )
         self.quote_manager.load_settings(self.settings_manager.get_all())
+        if self.settings_manager.get_alert_enabled():
+            self.quote_manager.set_alert_polling_config(
+                self.settings_manager.get_alert_tasks(),
+                self.settings_manager.get_alert_scan_interval(),
+            )
+        else:
+            self.quote_manager.set_alert_polling_config([], self.settings_manager.get_alert_scan_interval())
+
+        # 黄金行情窗口管理器
+        self.gold_manager = GoldWindowManager(
+            on_settings_changed=self._on_gold_settings_changed,
+            on_visibility_changed=self._on_gold_visibility_changed,
+            on_target_visibility_changed=self._on_gold_target_visibility_changed,
+        )
+        self.gold_manager.load_settings(self.settings_manager.get_all())
+        self.gold_manager.set_alert_polling_config(
+            self.settings_manager.get_gold_alert_tasks(),
+            self.settings_manager.get_gold_alert_scan_interval(),
+        )
         
         # 预警引擎
         self.alert_engine = AlertEngine(
@@ -87,6 +111,7 @@ class AShareToolsApp(QApplication):
         self.tray_icon = SystemTrayIcon(
             app=self,
             quote_manager=self.quote_manager,
+            gold_manager=self.gold_manager,
             alert_engine=self.alert_engine,
             settings_manager=self.settings_manager
         )
@@ -101,14 +126,32 @@ class AShareToolsApp(QApplication):
         else:
             self.quote_manager.start()
             self.quote_manager.hide_windows()
+
+        # 启动黄金行情窗口
+        self.gold_manager.start()
+        if self.settings_manager.get_gold_enabled():
+            self.gold_manager.show_windows()
+            self.gold_manager.refresh_quotes(force=True)
+        else:
+            self.gold_manager.hide_windows()
+
+        # 启动后立即执行一次运行时调度（股票+黄金）
+        self.tray_icon._check_time_schedule()
         
         # 启动预警（如果已启用）
         if self.settings_manager.get_alert_enabled():
             tasks = self.settings_manager.get_alert_tasks()
             scan_interval = self.settings_manager.get_alert_scan_interval()
+            gold_tasks = self.settings_manager.get_gold_alert_tasks()
+            gold_scan_interval = self.settings_manager.get_gold_alert_scan_interval()
             dingtalk = self.settings_manager.get_dingtalk_config()
             
-            self.alert_engine.update_tasks(tasks, scan_interval)
+            self.alert_engine.update_tasks(
+                tasks,
+                scan_interval,
+                gold_tasks=gold_tasks,
+                gold_scan_interval=gold_scan_interval,
+            )
             self.notifier.update_config(
                 dingtalk.get('webhook', ''),
                 dingtalk.get('secret', '')
@@ -118,7 +161,14 @@ class AShareToolsApp(QApplication):
             # 即使未启用，也加载任务配置，以便后续启用时直接使用
             tasks = self.settings_manager.get_alert_tasks()
             scan_interval = self.settings_manager.get_alert_scan_interval()
-            self.alert_engine.update_tasks(tasks, scan_interval)
+            gold_tasks = self.settings_manager.get_gold_alert_tasks()
+            gold_scan_interval = self.settings_manager.get_gold_alert_scan_interval()
+            self.alert_engine.update_tasks(
+                tasks,
+                scan_interval,
+                gold_tasks=gold_tasks,
+                gold_scan_interval=gold_scan_interval,
+            )
             # 确保不启动
             if self.alert_engine.is_running():
                 self.alert_engine.stop()
@@ -142,8 +192,30 @@ class AShareToolsApp(QApplication):
 
     def _on_quote_visibility_changed(self, visible: bool):
         """行情窗口可见性变化回调"""
-        self.tray_icon.show_quote_action.setChecked(visible)
-        self.settings_manager.set_quote_enabled(visible)
+        if hasattr(self, 'tray_icon') and self.tray_icon:
+            self.tray_icon._sync_quote_state(bool(visible))
+        else:
+            self.settings_manager.set_quote_enabled(bool(visible))
+
+    def _on_gold_settings_changed(self):
+        """黄金设置改变回调"""
+        config = self.gold_manager.save_settings()
+        self.settings_manager.update_gold_window_settings(config)
+        self.settings_manager.set_gold_enabled(bool(self.gold_manager.enabled_keys))
+        self.gold_manager.set_alert_polling_config(
+            self.settings_manager.get_gold_alert_tasks(),
+            self.settings_manager.get_gold_alert_scan_interval(),
+        )
+
+    def _on_gold_target_visibility_changed(self, visible_map: dict):
+        """黄金标的可见状态变化回调"""
+        if hasattr(self, 'tray_icon') and self.tray_icon:
+            self.tray_icon._sync_gold_switches_if_open()
+
+    def _on_gold_visibility_changed(self, visible: bool):
+        """黄金窗口可见性变化回调"""
+        if not visible:
+            self.settings_manager.set_gold_enabled(False)
 
     def _on_alert_signal(self, symbol: str, strategy: str, signal: str, message: str):
         """预警信号回调"""
@@ -159,10 +231,25 @@ class AShareToolsApp(QApplication):
         """退出时的清理"""
         self.logger.info("AShareTools 正在退出...")
         try:
+            # 退出前强制落盘窗口状态（位置/大小/列宽/可见性）
+            self.quote_manager.flush_pending_settings()
+            self.gold_manager.flush_pending_settings()
+            self.settings_manager.set_quote_enabled(bool(self.quote_manager.is_visible()))
+            self.settings_manager.set_gold_enabled(bool(self.gold_manager.is_visible()))
+        except Exception as e:
+            self.logger.error(f"保存窗口状态失败: {e}")
+
+        try:
             # 先停止定时刷新与后台抓取线程
             self.quote_manager.stop()
         except Exception as e:
             self.logger.error(f"停止行情模块失败: {e}")
+
+        try:
+            # 停止黄金行情刷新与后台抓取线程
+            self.gold_manager.stop()
+        except Exception as e:
+            self.logger.error(f"停止黄金行情模块失败: {e}")
 
         try:
             # 再停止预警循环线程
@@ -185,6 +272,9 @@ class AShareToolsApp(QApplication):
         """处理自定义事件"""
         if event.type() == _QuoteUpdateEvent.EVENT_TYPE:
             self.quote_manager.on_quotes_received()
+            return True
+        if event.type() == _GoldUpdateEvent.EVENT_TYPE:
+            self.gold_manager.on_quotes_received()
             return True
         return super().event(event)
 

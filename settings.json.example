@@ -24,10 +24,61 @@
       ]
     }
   },
+  "gold_window": {
+    "enabled": false,
+    "targets": [
+      {"key": "london_spot", "name": "伦敦金现", "enabled": true},
+      {"key": "usd_cny", "name": "美元汇率", "enabled": true},
+      {"key": "london_spot_rmb", "name": "伦敦金现（RMB/g）", "enabled": true},
+      {"key": "ny_gold", "name": "纽约金", "enabled": true},
+      {"key": "au9999", "name": "AU9999", "enabled": true}
+    ],
+    "settings": {
+      "font_size": 14,
+      "background_alpha": 220,
+      "text_alpha": 255,
+      "show_name": false,
+      "show_code": false,
+      "show_column_header": false,
+      "always_on_top": true,
+      "column_widths": [140, 140, 140],
+      "row_height": 44,
+      "window_size": [420, 120],
+      "update_interval": 1
+    },
+    "code_settings": {},
+    "time_schedule": {
+      "enabled": false,
+      "symbol_periods": {
+        "london_spot": [
+          {"start": "09:25", "end": "11:35"},
+          {"start": "12:55", "end": "15:05"}
+        ],
+        "usd_cny": [
+          {"start": "09:25", "end": "11:35"},
+          {"start": "12:55", "end": "15:05"}
+        ],
+        "london_spot_rmb": [
+          {"start": "09:25", "end": "11:35"},
+          {"start": "12:55", "end": "15:05"}
+        ],
+        "ny_gold": [
+          {"start": "09:25", "end": "11:35"},
+          {"start": "12:55", "end": "15:05"}
+        ],
+        "au9999": [
+          {"start": "09:25", "end": "11:35"},
+          {"start": "12:55", "end": "15:05"}
+        ]
+      }
+    }
+  },
   "alert": {
     "enabled": false,
     "tasks": [],
     "scan_interval": 20,
+    "gold_tasks": [],
+    "gold_scan_interval": 20,
     "dingtalk": {
       "webhook": "",
       "secret": ""

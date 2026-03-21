@@ -13,11 +13,18 @@ A Python + PyQt6 based A-Share market monitoring and strategy alert tool, integr
 - **Highly Customizable**: Font size, opacity, column display, refresh rate, etc., are adjustable.
 - **Scheduled Display**: Supports setting time periods to automatically show/hide windows.
 
+### 🥇 Gold Market Window
+- **Built-in Gold Targets**: Includes London Spot, USD/CNY, London Spot (RMB/g), NY Gold, and AU9999.
+- **Per-Target Independent Windows**: Each gold target has its own floating window that can be enabled/disabled separately.
+- **Display Customization**: Supports font size, opacity, code display, refresh interval, and always-on-top settings.
+- **Per-Target Scheduled Display**: You can configure separate auto-display time periods for different gold targets.
+
 ### 📊 Intelligent Alert System
 - **Multiple Strategies**: Built-in strategies like MA Trend, MACD Momentum, Bollinger Reversion, Limit Board Warning, etc.
 - **Strategy Hot Reload**: Strategy definition files support dynamic reloading at runtime without restarting the program.
 - **Multi-Data Source**: Supports EastMoney, Tencent, and Sina data sources with automatic failover.
 - **DingTalk Notification**: Supports pushing trading signals via DingTalk robot.
+- **Gold Price Alerts**: Supports threshold-based gold alerts with configurable repeat frequency.
 
 ### 🎛️ System Tray
 - **Tray Icon**: Displays an icon in the system tray after the program starts.
@@ -71,7 +78,18 @@ In the "Market Window" tab of the Settings window:
   - **Display Options**: Toggle display of stock name, code, title bar, and "Always on Top".
 - **Scheduled Display**: When enabled, the market window only appears during specified time periods (e.g., 09:25-11:35, 12:55-15:05) and hides otherwise.
 
-### 2. Market Alert Settings
+### 2. Gold Market Settings
+
+In the "Gold Market" tab of the Settings window:
+
+- **Target Switches**: Independently control window visibility for London Spot, USD/CNY, London Spot (RMB/g), NY Gold, and AU9999.
+- **Display Settings**:
+  - **Font & Opacity**: Adjust font size, background opacity, and text opacity.
+  - **Refresh Interval**: Set the gold quote refresh interval (seconds).
+  - **Display Options**: Toggle code display and always-on-top.
+- **Scheduled Display**: Configure multiple time periods per gold target. When enabled, each target window is shown only during its configured periods.
+
+### 3. Market Alert Settings
 
 In the "Market Alerts" tab of the Settings window:
 
@@ -79,6 +97,12 @@ In the "Market Alerts" tab of the Settings window:
 - **Alert Tasks**:
   - **Scan Interval**: Set the time interval for strategy checks.
   - **Task List**: Add stocks to monitor, select a strategy (e.g., Bollinger Reversion, MA Trend), and K-line period.
+- **Gold Market Alerts**:
+  - **Scan Interval**: Set the gold alert scan interval (seconds).
+  - **Task List**: Configure alert price, alert frequency (minutes), and switch state for each gold target.
+  - **Trigger Rule**: An alert is triggered when current price >= alert price.
+  - **Frequency Behavior**: If frequency is 0, the task alerts once and auto-disables; if greater than 0, the task is automatically re-armed after the configured minutes.
+  - **Runtime Window**: Gold alerts are not tied to A-share trading hours and continue scanning in non-trading hours.
 - **Strategy Control**:
   - **Reload Strategies**: Click this button to hot-reload strategy code after modifying `strategies.py`.
   - **Refresh Status**: Refresh the running status of current alert tasks.
@@ -113,8 +137,9 @@ Click "Reload Strategies" after modification to take effect without restarting t
 
 Runtime configuration file, automatically created on first run. Contains:
 - Market window stock list and display settings
-- Time period configuration
-- Alert tasks and DingTalk configuration
+- Gold window target switches, display styles, and per-target schedule settings (`gold_window`)
+- A-share alert tasks, gold alert tasks, and their scan intervals (`alert.tasks` / `alert.gold_tasks`)
+- DingTalk notification configuration
 
 ### strategies.py
 
@@ -187,6 +212,7 @@ AShareTools/
 │   └── gui/
 │       ├── __init__.py
 │       ├── float_window.py  # Floating Window
+│       ├── gold_manager.py  # Gold Window Manager
 │       ├── main_window.py   # Settings Window
 │       ├── quote_manager.py # Quote Manager
 │       ├── toggle_switch.py # Toggle Control
@@ -209,6 +235,15 @@ A: Click the "Reload Strategies" button, or check the strategy file for syntax e
 
 ### Q: Packaged EXE fails to run?
 A: Ensure `strategies.py` file is in the same directory as the EXE.
+
+### Q: How to configure gold price alerts?
+A: In the "Market Alerts" tab of the Settings window, find the "Gold Market Alerts" section. First configure the DingTalk robot's Webhook and Secret, then add alert tasks and set price thresholds.
+
+### Q: Can stock alerts and gold alerts run simultaneously?
+A: Yes. Both alert systems run independently and share the same DingTalk notification configuration. You can configure separate scan intervals for each.
+
+### Q: Scheduled display not working?
+A: Ensure that "Scheduled Display" is enabled in the corresponding tab and the time range is configured correctly. Time format must be `HH:MM` (24-hour format).
 
 ## Disclaimer
 

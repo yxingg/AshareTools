@@ -115,3 +115,26 @@ class TradingScheduler:
         delta = (target_time - now).total_seconds()
         
         return max(1, delta), reason, target_time
+
+    def is_gold_alert_time(self) -> bool:
+        """
+        判断当前是否在黄金预警时间窗口内
+        
+        黄金预警时间: 周一 6:00 - 周六 4:45
+        (跨越周末，周六4:45后到周一6:00前为禁止时段)
+        """
+        now = self.get_now()
+        weekday = now.weekday()  # 0=周一, 6=周日
+        current_time = now.time()
+        
+        # 周一-周六
+        if weekday < 6:  # 0-5 为周一-周六
+            if weekday == 0:  # 周一
+                return current_time >= datetime.time(6, 0)
+            elif weekday < 5:  # 周二-周五
+                return True
+            else:  # 周六 (weekday == 5)
+                return current_time <= datetime.time(4, 45)
+        
+        # 周日不在窗口内
+        return False

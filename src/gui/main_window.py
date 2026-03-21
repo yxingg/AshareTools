@@ -34,17 +34,24 @@ from .toggle_switch import ToggleSwitch
 
 from ..utils import get_market_short_name, get_security_type
 from ..data_fetcher import StockNameManager
+from ..constants import DEFAULT_GOLD_TARGETS
 
 
 class MainWindow(QMainWindow):
     """主配置窗口"""
     
-    def __init__(self, quote_manager, alert_engine, settings_manager, parent=None):
+    def __init__(self, quote_manager, gold_manager, alert_engine, settings_manager, parent=None):
         super().__init__(parent)
         self.quote_manager = quote_manager
+        self.gold_manager = gold_manager
         self.alert_engine = alert_engine
         self.settings_manager = settings_manager
         self.on_settings_applied = None  # 设置应用后的回调
+        self.on_gold_settings_applied = None  # 黄金设置应用后的回调（预留接口）
+        self._gold_symbol_periods = {}
+        self._current_gold_target_key = None
+        self.gold_target_switches = {}
+        self._syncing_gold_switches = False
         
         self.setWindowTitle("")
         self.setWindowFlags(
@@ -198,7 +205,7 @@ class MainWindow(QMainWindow):
         self._nav_btn_style_active = nav_btn_style_active
         
         self._nav_btns = []
-        for i, name in enumerate(["\u884c\u60c5\u7a97\u53e3", "\u884c\u60c5\u9884\u8b66"]):
+        for i, name in enumerate(["\u884c\u60c5\u7a97\u53e3", "\u9ec4\u91d1\u884c\u60c5", "\u884c\u60c5\u9884\u8b66"]):
             btn = QPushButton(name)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(nav_btn_style_active if i == 0 else nav_btn_style_normal)
@@ -230,6 +237,7 @@ class MainWindow(QMainWindow):
         
         # 创建页面
         self._create_quote_tab()
+        self._create_gold_tab()
         self._create_alert_tab()
         
         # 底部按钮
@@ -307,7 +315,7 @@ class MainWindow(QMainWindow):
         
         # 显示设置
         display_group = QGroupBox("显示设置")
-        display_group.setMinimumHeight(250)
+        display_group.setMinimumHeight(220)
         display_layout = QFormLayout(display_group)
         display_layout.setContentsMargins(6, 10, 6, 6)
         display_layout.setSpacing(4)
@@ -380,6 +388,121 @@ class MainWindow(QMainWindow):
         scroll.setWidget(tab)
         self._stacked.addWidget(scroll)
 
+    def _create_gold_tab(self):
+        """创建黄金行情选项卡"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        tab = QWidget()
+        tab.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # 固定黄金标的
+        gold_targets_group = QGroupBox("监控黄金标的")
+        gold_targets_layout = QVBoxLayout(gold_targets_group)
+        gold_targets_layout.setContentsMargins(6, 10, 6, 6)
+        gold_targets_layout.setSpacing(4)
+
+        self.gold_targets_rows_layout = QVBoxLayout()
+        self.gold_targets_rows_layout.setSpacing(4)
+        gold_targets_layout.addLayout(self.gold_targets_rows_layout)
+
+        layout.addWidget(gold_targets_group)
+
+        # 显示设置（与行情窗口一致）
+        gold_display_group = QGroupBox("显示设置")
+        gold_display_group.setMinimumHeight(190)
+        gold_display_layout = QFormLayout(gold_display_group)
+        gold_display_layout.setContentsMargins(6, 10, 6, 6)
+        gold_display_layout.setSpacing(4)
+
+        self.gold_font_size_spin = QSpinBox()
+        self.gold_font_size_spin.setRange(8, 48)
+        self.gold_font_size_spin.setFixedWidth(80)
+        gold_display_layout.addRow("字体大小:", self.gold_font_size_spin)
+
+        self.gold_bg_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gold_bg_alpha_slider.setRange(0, 255)
+        gold_display_layout.addRow("背景透明度:", self.gold_bg_alpha_slider)
+
+        self.gold_text_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gold_text_alpha_slider.setRange(0, 255)
+        gold_display_layout.addRow("文字透明度:", self.gold_text_alpha_slider)
+
+        self.gold_refresh_interval_spin = QSpinBox()
+        self.gold_refresh_interval_spin.setRange(1, 3600)
+        self.gold_refresh_interval_spin.setSuffix(" 秒")
+        self.gold_refresh_interval_spin.setFixedWidth(80)
+        gold_display_layout.addRow("刷新间隔:", self.gold_refresh_interval_spin)
+
+        self.gold_show_code_check = ToggleSwitch("显示代码")
+        self.gold_always_top_check = ToggleSwitch("始终置顶")
+
+        gold_toggle_row1 = QHBoxLayout()
+        gold_toggle_row1.setSpacing(16)
+        gold_toggle_row1.addWidget(self.gold_show_code_check)
+        gold_toggle_row1.addWidget(self.gold_always_top_check)
+        gold_display_layout.addRow(gold_toggle_row1)
+
+        layout.addWidget(gold_display_group)
+
+        # 定时显示（按标的单独配置）
+        gold_schedule_group = QGroupBox("定时显示")
+        gold_schedule_layout = QVBoxLayout(gold_schedule_group)
+        gold_schedule_layout.setContentsMargins(6, 10, 6, 6)
+        gold_schedule_layout.setSpacing(4)
+
+        self.enable_gold_schedule_check = ToggleSwitch("启用定时显示")
+        gold_schedule_layout.addWidget(self.enable_gold_schedule_check)
+
+        target_layout = QHBoxLayout()
+        target_layout.addWidget(QLabel("配置标的:"))
+        self.gold_schedule_target_combo = QComboBox()
+        self.gold_schedule_target_combo.setStyleSheet(
+            "QComboBox {"
+            " background-color: #ffffff;"
+            " color: #1a1a1a;"
+            " border: 1px solid #c8c8c8;"
+            " border-radius: 4px;"
+            " padding: 2px 8px;"
+            "}"
+            "QComboBox QAbstractItemView {"
+            " background-color: #ffffff;"
+            " color: #1a1a1a;"
+            " selection-background-color: rgba(0,95,184,0.12);"
+            " selection-color: #1a1a1a;"
+            "}"
+        )
+        self.gold_schedule_target_combo.currentIndexChanged.connect(self._on_gold_target_changed)
+        target_layout.addWidget(self.gold_schedule_target_combo)
+        target_layout.addStretch()
+        gold_schedule_layout.addLayout(target_layout)
+
+        self.gold_schedule_table = QTableWidget(0, 3)
+        self.gold_schedule_table.setMinimumHeight(120)
+        self.gold_schedule_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.gold_schedule_table.setHorizontalHeaderLabels(["开始时间", "结束时间", "操作"])
+        self.gold_schedule_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.gold_schedule_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.gold_schedule_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.gold_schedule_table.setColumnWidth(2, 50)
+        self.gold_schedule_table.verticalHeader().setVisible(False)
+        gold_schedule_layout.addWidget(self.gold_schedule_table, 1)
+
+        add_gold_period_btn = QPushButton("添加时间段")
+        add_gold_period_btn.clicked.connect(self._add_gold_schedule_period)
+        gold_schedule_layout.addWidget(add_gold_period_btn)
+
+        layout.addWidget(gold_schedule_group)
+        layout.addStretch()
+
+        scroll.setWidget(tab)
+        self._stacked.addWidget(scroll)
+
     def _create_alert_tab(self):
         """创建行情预警选项卡"""
         # 外层 scroll area
@@ -420,7 +543,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(enable_layout)
         
         # 预警设置
-        alert_group = QGroupBox("预警设置")
+        alert_group = QGroupBox("股票行情预警")
         alert_layout = QVBoxLayout(alert_group)
         alert_layout.setContentsMargins(6, 10, 6, 6)
         alert_layout.setSpacing(4)
@@ -439,16 +562,18 @@ class MainWindow(QMainWindow):
         alert_layout.addLayout(top_layout)
         
         # 预警任务表格
-        self.alert_table = QTableWidget(0, 4)
+        self.alert_table = QTableWidget(0, 5)
         self.alert_table.setMinimumHeight(120)
         self.alert_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.alert_table.setHorizontalHeaderLabels(["股票代码", "策略", "K线周期（分钟）", "操作"])
+        self.alert_table.setHorizontalHeaderLabels(["股票代码", "策略", "K线周期（分钟）", "预警开关", "操作"])
         self.alert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.alert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.alert_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.alert_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.alert_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self.alert_table.setColumnWidth(2, 110)
-        self.alert_table.setColumnWidth(3, 50)
+        self.alert_table.setColumnWidth(3, 100)
+        self.alert_table.setColumnWidth(4, 60)
         self.alert_table.verticalHeader().setVisible(False)
         alert_layout.addWidget(self.alert_table, 1)  # stretch factor 1
         
@@ -477,6 +602,45 @@ class MainWindow(QMainWindow):
         alert_layout.addLayout(bottom_btn_layout)
         
         layout.addWidget(alert_group, 1)
+
+        # 黄金预警设置
+        gold_alert_group = QGroupBox("黄金行情预警")
+        gold_alert_layout = QVBoxLayout(gold_alert_group)
+        gold_alert_layout.setContentsMargins(6, 10, 6, 6)
+        gold_alert_layout.setSpacing(4)
+
+        gold_top_layout = QHBoxLayout()
+        gold_top_layout.setSpacing(8)
+        gold_top_layout.addWidget(QLabel("扫描间隔:"))
+        self.gold_alert_scan_interval_spin = QSpinBox()
+        self.gold_alert_scan_interval_spin.setRange(1, 3600)
+        self.gold_alert_scan_interval_spin.setSuffix(" 秒")
+        self.gold_alert_scan_interval_spin.setFixedWidth(80)
+        gold_top_layout.addWidget(self.gold_alert_scan_interval_spin)
+        gold_top_layout.addStretch()
+        gold_alert_layout.addLayout(gold_top_layout)
+
+        self.gold_alert_table = QTableWidget(0, 5)
+        self.gold_alert_table.setMinimumHeight(120)
+        self.gold_alert_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.gold_alert_table.setHorizontalHeaderLabels(["黄金标的", "预警价格", "预警频率（分钟）", "预警开关", "操作"])
+        self.gold_alert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.gold_alert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.gold_alert_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.gold_alert_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.gold_alert_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.gold_alert_table.setColumnWidth(2, 120)
+        self.gold_alert_table.setColumnWidth(3, 100)
+        self.gold_alert_table.setColumnWidth(4, 60)
+        self.gold_alert_table.verticalHeader().setVisible(False)
+        gold_alert_layout.addWidget(self.gold_alert_table, 1)
+
+        add_gold_alert_btn = QPushButton("添加预警任务")
+        add_gold_alert_btn.setFixedHeight(30)
+        add_gold_alert_btn.clicked.connect(self._add_gold_alert_task)
+        gold_alert_layout.addWidget(add_gold_alert_btn)
+
+        layout.addWidget(gold_alert_group, 1)
         layout.addStretch()
         
         scroll.setWidget(tab)
@@ -485,7 +649,7 @@ class MainWindow(QMainWindow):
     def _on_nav_changed(self, index: int):
         """侧边栏导航切换"""
         self._stacked.setCurrentIndex(index)
-        names = ["行情窗口", "行情预警"]
+        names = ["行情窗口", "黄金行情", "行情预警"]
         if 0 <= index < len(names):
             self._page_title.setText(names[index])
         for i, btn in enumerate(self._nav_btns):
@@ -494,7 +658,7 @@ class MainWindow(QMainWindow):
     def _load_current_settings(self):
         """加载当前设置"""
         # 行情窗口设置
-        self.enable_quote_check.setChecked(self.settings_manager.get_quote_enabled())
+        self.enable_quote_check.setChecked(self.quote_manager.is_visible())
         
         self.stock_list.clear()
         
@@ -521,6 +685,9 @@ class MainWindow(QMainWindow):
         # 定时显示
         self.enable_schedule_check.setChecked(self.settings_manager.get_time_schedule_enabled())
         self._load_schedule_periods()
+
+        # 黄金行情设置
+        self._load_gold_settings()
         
         # 预警设置
         dingtalk = self.settings_manager.get_dingtalk_config()
@@ -529,8 +696,10 @@ class MainWindow(QMainWindow):
         
         self.enable_alert_check.setChecked(self.settings_manager.get_alert_enabled())
         self.scan_interval_spin.setValue(self.settings_manager.get_alert_scan_interval())
+        self.gold_alert_scan_interval_spin.setValue(self.settings_manager.get_gold_alert_scan_interval())
         
         self._load_alert_tasks()
+        self._load_gold_alert_tasks()
 
     def _load_schedule_periods(self):
         """加载时间段"""
@@ -581,14 +750,15 @@ class MainWindow(QMainWindow):
             self._add_alert_task_row(
                 task.get('symbol', ''),
                 task.get('strategy', ''),
-                task.get('period', '5')
+                task.get('period', '5'),
+                bool(task.get('enabled', True)),
             )
 
     def _add_alert_task(self):
         """添加预警任务"""
-        self._add_alert_task_row('', '', '5')
+        self._add_alert_task_row('', '', '5', True)
 
-    def _add_alert_task_row(self, symbol: str, strategy: str, period: str):
+    def _add_alert_task_row(self, symbol: str, strategy: str, period: str, enabled: bool):
         """添加预警任务行"""
         row = self.alert_table.rowCount()
         self.alert_table.insertRow(row)
@@ -599,6 +769,7 @@ class MainWindow(QMainWindow):
         self.alert_table.setCellWidget(row, 0, code_edit)
         
         strategy_combo = QComboBox()
+        strategy_combo.setStyleSheet(self.gold_schedule_target_combo.styleSheet())
         strategies = self.alert_engine.get_available_strategies()
         for sid, info in strategies.items():
             strategy_combo.addItem(f"{info.get('name', sid)} ({sid})", sid)
@@ -614,18 +785,96 @@ class MainWindow(QMainWindow):
         period_combo.addItems(['1', '5', '15', '30', '60'])
         period_combo.setCurrentText(period)
         self.alert_table.setCellWidget(row, 2, period_combo)
+
+        switch = ToggleSwitch("")
+        switch.setChecked(enabled)
+        switch_container = QWidget()
+        switch_layout = QHBoxLayout(switch_container)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        switch_layout.setSpacing(0)
+        switch_layout.addStretch()
+        switch_layout.addWidget(switch)
+        switch_layout.addStretch()
+        self.alert_table.setCellWidget(row, 3, switch_container)
         
         del_btn = QPushButton("删除")
         del_btn.clicked.connect(lambda: self._remove_alert_row())
         del_btn.setFixedWidth(60)
-        self.alert_table.setCellWidget(row, 3, del_btn)
+        self.alert_table.setCellWidget(row, 4, del_btn)
 
     def _remove_alert_row(self):
         """删除预警任务行"""
         for i in range(self.alert_table.rowCount()):
-            btn = self.alert_table.cellWidget(i, 3)
+            btn = self.alert_table.cellWidget(i, 4)
             if btn == self.sender():
                 self.alert_table.removeRow(i)
+                break
+
+    def _load_gold_alert_tasks(self):
+        """加载黄金预警任务"""
+        self.gold_alert_table.setRowCount(0)
+        tasks = self.settings_manager.get_gold_alert_tasks()
+        for task in tasks:
+            self._add_gold_alert_task_row(
+                task.get('target', 'london_spot'),
+                str(task.get('price', '')),
+                str(task.get('frequency', 0)),
+                bool(task.get('enabled', True)),
+            )
+
+    def _add_gold_alert_task(self):
+        """添加黄金预警任务"""
+        self._add_gold_alert_task_row('london_spot', '', '0', True)
+
+    def _add_gold_alert_task_row(self, target: str, price: str, frequency: str, enabled: bool):
+        """添加黄金预警任务行"""
+        row = self.gold_alert_table.rowCount()
+        self.gold_alert_table.insertRow(row)
+
+        target_combo = QComboBox()
+        target_combo.setStyleSheet(self.gold_schedule_target_combo.styleSheet())
+        for item in DEFAULT_GOLD_TARGETS:
+            key = item.get('key', '')
+            name = item.get('name', key)
+            target_combo.addItem(name, key)
+        for i in range(target_combo.count()):
+            if target_combo.itemData(i) == target:
+                target_combo.setCurrentIndex(i)
+                break
+        self.gold_alert_table.setCellWidget(row, 0, target_combo)
+
+        price_edit = QLineEdit()
+        price_edit.setPlaceholderText('例如: 1130.5')
+        price_edit.setText(price)
+        self.gold_alert_table.setCellWidget(row, 1, price_edit)
+
+        freq_edit = QLineEdit()
+        freq_edit.setPlaceholderText('0=仅一次')
+        freq_edit.setText(frequency)
+        self.gold_alert_table.setCellWidget(row, 2, freq_edit)
+
+        switch = ToggleSwitch("")
+        switch.setChecked(enabled)
+        switch_container = QWidget()
+        switch_layout = QHBoxLayout(switch_container)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        switch_layout.setSpacing(0)
+        switch_layout.addStretch()
+        switch_layout.addWidget(switch)
+        switch_layout.addStretch()
+        self.gold_alert_table.setCellWidget(row, 3, switch_container)
+
+        del_btn = QPushButton("删除")
+        del_btn.clicked.connect(lambda: self._remove_gold_alert_row())
+        del_btn.setFixedWidth(60)
+        self.gold_alert_table.setCellWidget(row, 4, del_btn)
+
+    def _remove_gold_alert_row(self):
+        """删除黄金预警任务行"""
+        for i in range(self.gold_alert_table.rowCount()):
+            btn = self.gold_alert_table.cellWidget(i, 4)
+            if btn == self.sender():
+                self.gold_alert_table.removeRow(i)
                 break
 
     def _add_stock(self):
@@ -755,6 +1004,21 @@ class MainWindow(QMainWindow):
         
         # 重新加载任务列表
         self._load_alert_tasks()
+        if is_running:
+            runtime_gold_tasks = self.alert_engine.get_gold_tasks_snapshot()
+            self.settings_manager.set_gold_alert_tasks(runtime_gold_tasks)
+        self._load_gold_alert_tasks()
+        if is_running:
+            self.quote_manager.set_alert_polling_config(
+                self.settings_manager.get_alert_tasks(),
+                self.settings_manager.get_alert_scan_interval(),
+            )
+        else:
+            self.quote_manager.set_alert_polling_config([], self.settings_manager.get_alert_scan_interval())
+        self.gold_manager.set_alert_polling_config(
+            self.settings_manager.get_gold_alert_tasks(),
+            self.settings_manager.get_gold_alert_scan_interval(),
+        )
         
         status_text = "运行中" if is_running else "已停止"
         
@@ -790,21 +1054,15 @@ class MainWindow(QMainWindow):
         self.quote_manager.show_code = self.show_code_check.isChecked()
         self.quote_manager.show_column_header = self.show_header_check.isChecked()
         self.quote_manager.always_on_top = self.always_top_check.isChecked()
-        
-        self.quote_manager.fetch_timer.setInterval(self.quote_manager.update_interval * 1000)
+        self.quote_manager._reconcile_polling_state()
         
         # 根据开关控制行情窗口
         if quote_enabled:
-            # 必须调用 show_windows 以确保 _visible 标志被重置为 True
             self.quote_manager.show_windows()
             self.quote_manager._apply_settings_to_all()
             self.quote_manager._notify_settings_changed()
-            if not self.quote_manager.fetch_timer.isActive():
-                self.quote_manager.fetch_timer.start()
         else:
-            # 关闭行情窗口
-            self.quote_manager.fetch_timer.stop()
-            self.quote_manager.close_all_windows()
+            self.quote_manager.hide_windows()
         
         # 定时显示设置
         self.settings_manager.set_time_schedule_enabled(self.enable_schedule_check.isChecked())
@@ -819,6 +1077,54 @@ class MainWindow(QMainWindow):
                     'end': end_edit.time().toString("HH:mm"),
                 })
         self.settings_manager.set_time_schedule_periods(periods)
+
+        # 黄金行情设置（预留接口，数据暂不接入行情）
+        self._save_current_gold_schedule_periods()
+        updated_targets = []
+        for target in self._gold_targets:
+            key = target.get('key', '')
+            name = target.get('name', key)
+            switch = self.gold_target_switches.get(key)
+            enabled = switch.isChecked() if switch else target.get('enabled', True)
+            updated_targets.append({'key': key, 'name': name, 'enabled': enabled})
+
+        self.settings_manager.set_gold_targets(updated_targets)
+        self.settings_manager.set_gold_enabled(any(t.get('enabled', False) for t in updated_targets))
+        self.settings_manager.set_gold_config({
+            'settings': {
+                'font_size': self.gold_font_size_spin.value(),
+                'background_alpha': self.gold_bg_alpha_slider.value(),
+                'text_alpha': self.gold_text_alpha_slider.value(),
+                'show_code': self.gold_show_code_check.isChecked(),
+                'always_on_top': self.gold_always_top_check.isChecked(),
+                'update_interval': self.gold_refresh_interval_spin.value(),
+            }
+        })
+        self.settings_manager.set_gold_time_schedule_enabled(self.enable_gold_schedule_check.isChecked())
+        self.settings_manager.set_gold_symbol_periods(self._gold_symbol_periods)
+
+        self.gold_manager.set_targets(updated_targets)
+        self.gold_manager.font_size = self.gold_font_size_spin.value()
+        self.gold_manager.background_alpha = self.gold_bg_alpha_slider.value()
+        self.gold_manager.text_alpha = self.gold_text_alpha_slider.value()
+        self.gold_manager.show_name = False
+        self.gold_manager.show_code = self.gold_show_code_check.isChecked()
+        self.gold_manager.show_column_header = False
+        self.gold_manager.always_on_top = self.gold_always_top_check.isChecked()
+        self.gold_manager.update_interval = max(1, self.gold_refresh_interval_spin.value())
+        self.gold_manager.fetch_timer.setInterval(self.gold_manager.update_interval * 1000)
+        self.gold_manager._apply_settings_to_all()
+        if any(t.get('enabled', False) for t in updated_targets):
+            self.gold_manager.show_windows()
+            if not self.gold_manager.fetch_timer.isActive():
+                self.gold_manager.fetch_timer.start()
+            self.gold_manager.refresh_quotes(force=True)
+        else:
+            self.gold_manager.hide_windows()
+        self.gold_manager._notify_settings_changed()
+
+        if self.on_gold_settings_applied:
+            self.on_gold_settings_applied()
         
         # 预警设置
         self.settings_manager.set_dingtalk_config({
@@ -831,18 +1137,61 @@ class MainWindow(QMainWindow):
             code_edit = self.alert_table.cellWidget(row, 0)
             strategy_combo = self.alert_table.cellWidget(row, 1)
             period_combo = self.alert_table.cellWidget(row, 2)
+            switch_widget = self.alert_table.cellWidget(row, 3)
+            switch = switch_widget if isinstance(switch_widget, ToggleSwitch) else (
+                switch_widget.findChild(ToggleSwitch) if switch_widget else None
+            )
             
-            if code_edit and strategy_combo and period_combo:
+            if code_edit and strategy_combo and period_combo and switch:
                 symbol = code_edit.text().strip()
                 if symbol:
                     tasks.append({
                         'symbol': symbol,
                         'strategy': strategy_combo.currentData(),
                         'period': period_combo.currentText(),
+                        'enabled': switch.isChecked(),
                     })
+
+        gold_tasks = []
+        for row in range(self.gold_alert_table.rowCount()):
+            target_combo = self.gold_alert_table.cellWidget(row, 0)
+            price_edit = self.gold_alert_table.cellWidget(row, 1)
+            freq_edit = self.gold_alert_table.cellWidget(row, 2)
+            switch_widget = self.gold_alert_table.cellWidget(row, 3)
+            switch = switch_widget if isinstance(switch_widget, ToggleSwitch) else (
+                switch_widget.findChild(ToggleSwitch) if switch_widget else None
+            )
+
+            if not target_combo or not price_edit or not freq_edit or not switch:
+                continue
+
+            target = target_combo.currentData()
+            try:
+                price = float(price_edit.text().strip())
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+            try:
+                frequency = int(freq_edit.text().strip() or '0')
+            except Exception:
+                frequency = 0
+
+            gold_tasks.append({
+                'target': target,
+                'price': price,
+                'frequency': max(0, frequency),
+                'enabled': switch.isChecked(),
+            })
         
         self.settings_manager.set_alert_tasks(tasks)
         self.settings_manager.set_alert_scan_interval(self.scan_interval_spin.value())
+        self.settings_manager.set_gold_alert_tasks(gold_tasks)
+        self.settings_manager.set_gold_alert_scan_interval(self.gold_alert_scan_interval_spin.value())
+        self.gold_manager.set_alert_polling_config(
+            gold_tasks,
+            self.gold_alert_scan_interval_spin.value(),
+        )
         
         # 更新预警引擎
         was_running = self.alert_engine.is_running()
@@ -850,7 +1199,16 @@ class MainWindow(QMainWindow):
         
         if should_run:
             dingtalk = self.settings_manager.get_dingtalk_config()
-            self.alert_engine.update_tasks(tasks, self.scan_interval_spin.value())
+            self.quote_manager.set_alert_polling_config(
+                tasks,
+                self.scan_interval_spin.value(),
+            )
+            self.alert_engine.update_tasks(
+                tasks,
+                self.scan_interval_spin.value(),
+                gold_tasks=gold_tasks,
+                gold_scan_interval=self.gold_alert_scan_interval_spin.value(),
+            )
             if self.alert_engine.notifier:
                 self.alert_engine.notifier.update_config(
                     dingtalk.get('webhook', ''),
@@ -864,6 +1222,7 @@ class MainWindow(QMainWindow):
                 if self.alert_engine.notifier:
                     self.alert_engine.notifier.send(f"【系统通知】\n预警配置已更新\n当前任务数: {len(tasks)}")
         else:
+            self.quote_manager.set_alert_polling_config([], self.scan_interval_spin.value())
             if was_running:
                 self.alert_engine.stop()
         
@@ -872,6 +1231,181 @@ class MainWindow(QMainWindow):
         # 同步托盘图标菜单状态
         if self.on_settings_applied:
             self.on_settings_applied()
+
+    def _load_gold_settings(self):
+        """加载黄金行情设置（界面）"""
+        gold_config = self.settings_manager.get_gold_config()
+        targets = self.gold_manager.targets or gold_config.get('targets') or [target.copy() for target in DEFAULT_GOLD_TARGETS]
+        normalized_targets = []
+        for target in targets:
+            key = target.get('key', '')
+            name = target.get('name', key)
+            normalized_targets.append({
+                'key': key,
+                'name': name,
+                'enabled': target.get('enabled', True),
+            })
+        self._gold_targets = normalized_targets
+        self._rebuild_gold_target_rows()
+
+        self.gold_schedule_target_combo.blockSignals(True)
+        self.gold_schedule_target_combo.clear()
+
+        for target in normalized_targets:
+            key = target.get('key', '')
+            name = target.get('name', key)
+            self.gold_schedule_target_combo.addItem(name, key)
+
+        self.gold_schedule_target_combo.blockSignals(False)
+
+        self.gold_font_size_spin.setValue(self.gold_manager.font_size)
+        self.gold_bg_alpha_slider.setValue(self.gold_manager.background_alpha)
+        self.gold_text_alpha_slider.setValue(self.gold_manager.text_alpha)
+        self.gold_refresh_interval_spin.setValue(self.gold_manager.update_interval)
+        self.gold_show_code_check.setChecked(self.gold_manager.show_code)
+        self.gold_always_top_check.setChecked(self.gold_manager.always_on_top)
+
+        self.enable_gold_schedule_check.setChecked(self.settings_manager.get_gold_time_schedule_enabled())
+        self._gold_symbol_periods = self.settings_manager.get_gold_symbol_periods()
+
+        if self.gold_schedule_target_combo.count() > 0:
+            self._current_gold_target_key = self.gold_schedule_target_combo.currentData()
+            self._load_gold_schedule_table(self._current_gold_target_key)
+        else:
+            self._current_gold_target_key = None
+
+        self.sync_gold_target_switches_with_visibility()
+
+    def sync_gold_target_switches_with_visibility(self):
+        """同步黄金标的开关与真实窗口可见状态"""
+        visible_by_key = self.gold_manager.get_target_visibility_map()
+        self._syncing_gold_switches = True
+        for key, switch in self.gold_target_switches.items():
+            switch.setChecked(bool(visible_by_key.get(key, False)))
+        self._syncing_gold_switches = False
+
+        # 同步本地缓存，避免“应用”时读到旧状态
+        for target in self._gold_targets:
+            key = target.get('key', '')
+            if key:
+                target['enabled'] = bool(visible_by_key.get(key, False))
+
+    def _rebuild_gold_target_rows(self):
+        """重建黄金标的行（名称 + 独立开关）"""
+        while self.gold_targets_rows_layout.count():
+            item = self.gold_targets_rows_layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            if child_layout:
+                while child_layout.count():
+                    child_item = child_layout.takeAt(0)
+                    child_widget = child_item.widget()
+                    if child_widget:
+                        child_widget.deleteLater()
+
+        self.gold_target_switches = {}
+        for target in self._gold_targets:
+            key = target.get('key', '')
+            name = target.get('name', key)
+            enabled = target.get('enabled', True)
+
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(QLabel(name))
+            row_layout.addStretch()
+
+            switch = ToggleSwitch("")
+            switch.setChecked(enabled)
+            switch.toggled.connect(lambda checked, k=key: self._on_gold_target_switch_toggled(k, checked))
+            self.gold_target_switches[key] = switch
+            row_layout.addWidget(switch)
+
+            self.gold_targets_rows_layout.addLayout(row_layout)
+
+        self.gold_targets_rows_layout.addStretch()
+
+    def _on_gold_target_switch_toggled(self, key: str, checked: bool):
+        """黄金标的开关实时双向绑定到底层窗口状态"""
+        if self._syncing_gold_switches:
+            return
+
+        self.gold_manager.set_target_visible_state(key, bool(checked), persist=True)
+        for target in self._gold_targets:
+            if target.get('key', '') == key:
+                target['enabled'] = bool(checked)
+                break
+
+    def _on_gold_target_changed(self, index: int):
+        """切换黄金标的定时配置"""
+        if index < 0:
+            return
+        self._save_current_gold_schedule_periods()
+        self._current_gold_target_key = self.gold_schedule_target_combo.itemData(index)
+        self._load_gold_schedule_table(self._current_gold_target_key)
+
+    def _load_gold_schedule_table(self, target_key: str):
+        """加载指定黄金标的的时间段到表格"""
+        self.gold_schedule_table.setRowCount(0)
+        periods = self._gold_symbol_periods.get(target_key, [
+            {'start': '09:25', 'end': '11:35'},
+            {'start': '12:55', 'end': '15:05'},
+        ])
+        for period in periods:
+            self._add_gold_schedule_period_row(period.get('start', '09:25'), period.get('end', '15:05'))
+
+    def _save_current_gold_schedule_periods(self):
+        """保存当前黄金标的时间段"""
+        target_key = getattr(self, '_current_gold_target_key', None)
+        if not target_key:
+            return
+
+        periods = []
+        for row in range(self.gold_schedule_table.rowCount()):
+            start_edit = self.gold_schedule_table.cellWidget(row, 0)
+            end_edit = self.gold_schedule_table.cellWidget(row, 1)
+            if start_edit and end_edit:
+                periods.append({
+                    'start': start_edit.time().toString("HH:mm"),
+                    'end': end_edit.time().toString("HH:mm"),
+                })
+        self._gold_symbol_periods[target_key] = periods
+
+    def _add_gold_schedule_period(self):
+        """添加黄金时间段"""
+        self._add_gold_schedule_period_row('09:25', '15:05')
+
+    def _add_gold_schedule_period_row(self, start: str, end: str):
+        """添加黄金时间段行"""
+        row = self.gold_schedule_table.rowCount()
+        self.gold_schedule_table.insertRow(row)
+
+        start_edit = QTimeEdit()
+        start_parts = start.split(':')
+        start_edit.setTime(QTime(int(start_parts[0]), int(start_parts[1])))
+        start_edit.setDisplayFormat("HH:mm")
+        self.gold_schedule_table.setCellWidget(row, 0, start_edit)
+
+        end_edit = QTimeEdit()
+        end_parts = end.split(':')
+        end_edit.setTime(QTime(int(end_parts[0]), int(end_parts[1])))
+        end_edit.setDisplayFormat("HH:mm")
+        self.gold_schedule_table.setCellWidget(row, 1, end_edit)
+
+        del_btn = QPushButton("删除")
+        del_btn.setFixedWidth(60)
+        del_btn.clicked.connect(lambda: self._remove_gold_schedule_row())
+        self.gold_schedule_table.setCellWidget(row, 2, del_btn)
+
+    def _remove_gold_schedule_row(self):
+        """删除黄金时间段行"""
+        for i in range(self.gold_schedule_table.rowCount()):
+            btn = self.gold_schedule_table.cellWidget(i, 2)
+            if btn == self.sender():
+                self.gold_schedule_table.removeRow(i)
+                break
 
     def closeEvent(self, event: QCloseEvent):
         """关闭时隐藏而不是退出"""

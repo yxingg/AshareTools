@@ -3,6 +3,7 @@
 
 import logging
 import queue
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -57,7 +58,13 @@ class QuoteWindowManager:
         # 状态
         self.fetch_in_progress = False
         self._force_refresh_requested = False
-        self._visible = True  # 是否显示窗口
+        self._visible = False  # 是否显示窗口
+        self._last_requested_codes: set[str] = set()
+
+        # 预警特权拉取（窗口隐藏时，允许有预警的标的按预警频率拉取）
+        self._alert_poll_intervals: Dict[str, int] = {}
+        self._alert_last_poll_time: Dict[str, float] = {}
+        self._default_alert_poll_interval = 20
         
         # 回调
         self.on_settings_changed = on_settings_changed
@@ -71,9 +78,17 @@ class QuoteWindowManager:
         self.fetch_timer.setInterval(self.update_interval * 1000)
         self.fetch_timer.timeout.connect(self.refresh_quotes)
 
+        # 窗口手动调整后的防抖保存（5秒）
+        self._sync_delay_ms = 5000
+        self._pending_sync_codes: set[str] = set()
+        self._sync_timer = QTimer()
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.timeout.connect(self._flush_synced_settings)
+
     def load_settings(self, settings: Dict):
         """从配置加载设置"""
         quote_config = settings.get('quote_window', {})
+        self._visible = bool(quote_config.get('enabled', True))
         
         self.codes = quote_config.get('stocks', [])
         self.code_settings = quote_config.get('code_settings', {})
@@ -118,44 +133,111 @@ class QuoteWindowManager:
         if self.executor is None:
             self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
         self._ensure_windows(initial=True)
-        if self.codes:
+        if self._visible and self.codes:
             self.refresh_quotes(force=True)
-        self.fetch_timer.start()
+        self._reconcile_polling_state()
 
     def stop(self):
         """停止行情刷新"""
         self.fetch_timer.stop()
         self._force_refresh_requested = False
+        self._last_requested_codes = set()
         if self.executor:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.executor = None
 
+    def set_alert_polling_config(self, alert_tasks: List[Dict[str, Any]], default_interval: int = 20) -> None:
+        """配置隐藏窗口下的预警特权拉取频率（秒）"""
+        self._default_alert_poll_interval = max(1, int(default_interval or 20))
+        intervals: Dict[str, int] = {}
+
+        for task in alert_tasks or []:
+            if not task.get('enabled', True):
+                continue
+
+            symbol = str(task.get('symbol', '')).strip()
+            if not symbol:
+                continue
+
+            normalized = normalize_stock_code(symbol)
+            if not normalized:
+                continue
+
+            try:
+                task_interval = int(task.get('interval', 0) or 0)
+            except Exception:
+                task_interval = 0
+
+            poll_sec = self._default_alert_poll_interval if task_interval <= 0 else max(1, task_interval)
+            prev = intervals.get(normalized)
+            if prev is None or poll_sec < prev:
+                intervals[normalized] = poll_sec
+
+        self._alert_poll_intervals = intervals
+        self._alert_last_poll_time = {
+            code: ts for code, ts in self._alert_last_poll_time.items() if code in intervals
+        }
+        self._reconcile_polling_state()
+
+    def _reconcile_polling_state(self) -> None:
+        """根据当前显示状态和预警特权配置启停轮询定时器。"""
+        need_polling = bool((self._visible and self.codes) or self._alert_poll_intervals)
+        if need_polling:
+            intervals: List[int] = []
+            if self._visible and self.codes:
+                intervals.append(max(1, int(self.update_interval)))
+            if self._alert_poll_intervals:
+                intervals.append(max(1, min(int(v) for v in self._alert_poll_intervals.values())))
+            target_interval = max(1, min(intervals) if intervals else int(self.update_interval))
+            if self.fetch_timer.interval() != target_interval * 1000:
+                self.fetch_timer.setInterval(target_interval * 1000)
+            if not self.fetch_timer.isActive():
+                self.fetch_timer.start()
+            return
+        if self.fetch_timer.isActive():
+            self.fetch_timer.stop()
+
     def show_windows(self):
         """显示所有窗口"""
+        state_changed = not self._visible
         self._visible = True
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
         self._ensure_windows(initial=True)
         for window in self.windows.values():
             window.show()
             window.raise_()  # 确保窗口在最前面
+        self._reconcile_polling_state()
+        if self.codes:
+            self.refresh_quotes(force=True)
+        if state_changed and self.on_visibility_changed:
+            self.on_visibility_changed(True)
 
     def hide_windows(self):
         """隐藏所有窗口"""
+        state_changed = self._visible
         self._visible = False
         for window in self.windows.values():
             window.hide()
+        self._reconcile_polling_state()
+        if state_changed and self.on_visibility_changed:
+            self.on_visibility_changed(False)
 
     def close_all_windows(self):
         """关闭所有窗口"""
+        state_changed = self._visible
         self._visible = False
+        self.capture_window_states(notify=False)
         for window in self.windows.values():
             window.close()
         self.windows.clear()
+        self._reconcile_polling_state()
+        if state_changed and self.on_visibility_changed:
+            self.on_visibility_changed(False)
 
     def _close_windows_and_notify(self):
         """关闭窗口并通知托盘更新状态"""
         self.hide_windows()
-        if self.on_visibility_changed:
-            self.on_visibility_changed(False)
 
     def is_visible(self) -> bool:
         """是否可见"""
@@ -209,18 +291,10 @@ class QuoteWindowManager:
                 window._always_on_top = code_cfg.get('always_on_top', self.always_on_top)
                 window.apply_settings(config, initial=initial)
                 window.update_quote(self.quotes.get(code))
-                
+
                 # 恢复窗口位置、大小、列宽（抑制同步）
                 window._initializing = True
-                if 'window_pos' in code_cfg:
-                    pos = code_cfg['window_pos']
-                    window.move(pos[0], pos[1])
-                if 'window_size' in code_cfg:
-                    size = code_cfg['window_size']
-                    window.resize(size[0], size[1])
-                if 'column_widths' in code_cfg:
-                    for i, w in enumerate(code_cfg['column_widths']):
-                        window.table.setColumnWidth(i, w)
+                self._restore_window_state(window, code_cfg)
                 window._initializing = False
                 
                 if self._visible:
@@ -359,7 +433,7 @@ class QuoteWindowManager:
         value, ok = QInputDialog.getInt(parent, "刷新频率", "秒:", self.update_interval, 1, 3600, 1)
         if ok:
             self.update_interval = value
-            self.fetch_timer.setInterval(self.update_interval * 1000)
+            self._reconcile_polling_state()
             self._notify_settings_changed()
 
     def add_code(self, code: str) -> None:
@@ -370,6 +444,7 @@ class QuoteWindowManager:
             return
         self.codes.append(normalized)
         self._ensure_windows(initial=True)
+        self._reconcile_polling_state()
         self.refresh_quotes(force=True)
         self._notify_settings_changed()
 
@@ -381,6 +456,7 @@ class QuoteWindowManager:
         if window:
             window.close()
         self.quotes.pop(code, None)
+        self._reconcile_polling_state()
         self._notify_settings_changed()
 
     def set_show_name(self, value: bool) -> None:
@@ -439,23 +515,102 @@ class QuoteWindowManager:
 
     def sync_from_window(self, window: StockFloatWindow) -> None:
         """从窗口同步设置（包括位置和大小）"""
+        self._sync_window_state(window)
+        self._pending_sync_codes.add(window.code)
+        self._sync_timer.start(self._sync_delay_ms)
+
+    def capture_window_states(self, notify: bool = True) -> None:
+        """立即采集所有窗口状态（用于退出前落盘）。"""
+        for window in self.windows.values():
+            self._sync_window_state(window)
+        if notify:
+            self._notify_settings_changed()
+
+    def flush_pending_settings(self) -> None:
+        """立即刷写防抖中的窗口状态。"""
+        if self._sync_timer.isActive():
+            self._sync_timer.stop()
+        self.capture_window_states(notify=True)
+        self._pending_sync_codes.clear()
+
+    def _flush_synced_settings(self) -> None:
+        if not self._pending_sync_codes:
+            return
+        self._pending_sync_codes.clear()
+        self._notify_settings_changed()
+
+    def _sync_window_state(self, window: StockFloatWindow) -> None:
         self.column_widths = window.get_column_widths()
         self.row_height = window.get_row_height()
         self.window_size = window.get_window_size()
-        
-        # 保存窗口位置、大小和列宽到code_settings
+
         code = window.code
         if code not in self.code_settings:
             self.code_settings[code] = {}
         self.code_settings[code]['window_pos'] = [window.x(), window.y()]
         self.code_settings[code]['window_size'] = list(window.get_window_size())
         self.code_settings[code]['column_widths'] = window.get_column_widths()
-        
-        self._notify_settings_changed()
+        self.code_settings[code]['visible'] = bool(window.isVisible())
+
+    def _restore_window_state(self, window: StockFloatWindow, code_cfg: Dict[str, Any]) -> None:
+        size = code_cfg.get('window_size')
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            try:
+                window.resize(max(int(size[0]), 1), max(int(size[1]), 1))
+            except Exception:
+                pass
+
+        if 'column_widths' in code_cfg:
+            for i, w in enumerate(code_cfg.get('column_widths', [])[: window.table.columnCount()]):
+                try:
+                    window.table.setColumnWidth(i, int(w))
+                except Exception:
+                    continue
+
+        pos = code_cfg.get('window_pos')
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            try:
+                window.move(int(pos[0]), int(pos[1]))
+            except Exception:
+                pass
+
+        self._ensure_window_on_screen(window)
+
+    def _ensure_window_on_screen(self, window: StockFloatWindow) -> None:
+        screens = QApplication.screens()
+        if not screens:
+            return
+
+        frame = window.frameGeometry()
+        if any(screen.availableGeometry().intersects(frame) for screen in screens):
+            return
+
+        target_screen = QApplication.screenAt(frame.center()) or QApplication.primaryScreen() or screens[0]
+        area = target_screen.availableGeometry()
+
+        width = min(max(window.width(), window.minimumWidth()), max(1, area.width()))
+        height = min(max(window.height(), window.minimumHeight()), max(1, area.height()))
+        window.resize(width, height)
+
+        x = min(max(window.x(), area.left()), area.left() + max(0, area.width() - width))
+        y = min(max(window.y(), area.top()), area.top() + max(0, area.height() - height))
+        window.move(x, y)
 
     def refresh_quotes(self, force: bool = False) -> None:
         """刷新行情"""
-        if not self.codes:
+        visible_codes = set(self.codes) if self._visible else set()
+        now = time.time()
+
+        alert_codes: set[str] = set()
+        for code, interval in self._alert_poll_intervals.items():
+            if code in visible_codes:
+                continue
+            last = self._alert_last_poll_time.get(code, 0.0)
+            if force or (now - last) >= max(1, int(interval)):
+                alert_codes.add(code)
+
+        request_codes = visible_codes | alert_codes
+        if not request_codes:
             return
         if self.fetch_in_progress:
             if force:
@@ -463,9 +618,12 @@ class QuoteWindowManager:
             return
         self.fetch_in_progress = True
         self._force_refresh_requested = False
+        self._last_requested_codes = set(request_codes)
+        for code in alert_codes:
+            self._alert_last_poll_time[code] = now
         if self.executor is None:
             self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-fetch")
-        self.executor.submit(self._fetch_worker, list(self.codes))
+        self.executor.submit(self._fetch_worker, list(request_codes))
 
     def _fetch_worker(self, codes: List[str]) -> None:
         """获取行情的工作线程"""
@@ -492,7 +650,7 @@ class QuoteWindowManager:
                 break
             for quote in quotes:
                 self.quotes[quote.code] = quote
-                if quote.code in self.windows:
+                if quote.code in self._last_requested_codes and quote.code in self.windows:
                     self.windows[quote.code].update_quote(quote)
 
 

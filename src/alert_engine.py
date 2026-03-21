@@ -8,13 +8,14 @@ import logging
 import time
 import importlib.util
 import threading
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 
 from .config import (
     STRATEGIES_FILE,
     DEFAULT_SCAN_INTERVAL, AVAILABLE_DATA_SOURCES
 )
-from .data_fetcher import KLineFetcher, StockNameManager
+from .constants import DEFAULT_GOLD_TARGETS
+from .data_fetcher import KLineFetcher, StockNameManager, GoldQuoteFetcher
 from .indicators import calculate_indicators
 from .scheduler import TradingScheduler
 
@@ -117,6 +118,15 @@ class AlertEngine:
         # 任务列表
         self.tasks: List[Dict] = []
         self.scan_interval = DEFAULT_SCAN_INTERVAL
+        self.gold_tasks: List[Dict[str, Any]] = []
+        self.gold_scan_interval = DEFAULT_SCAN_INTERVAL
+        self._gold_last_scan_time = 0.0
+        self.gold_fetcher = GoldQuoteFetcher()
+        self._gold_target_names = {
+            t.get('key', ''): t.get('name', t.get('key', ''))
+            for t in DEFAULT_GOLD_TARGETS
+            if t.get('key')
+        }
         
         # 数据获取器
         self.data_fetchers: Dict[tuple, Dict] = {}
@@ -129,22 +139,34 @@ class AlertEngine:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-    def update_tasks(self, tasks: List[Dict], scan_interval: int = None):
+    def update_tasks(
+        self,
+        tasks: List[Dict],
+        scan_interval: int = None,
+        gold_tasks: Optional[List[Dict]] = None,
+        gold_scan_interval: Optional[int] = None,
+    ):
         """
         更新预警任务
         
         Args:
             tasks: 任务列表 [{"symbol": "600519", "strategy": "MA_TREND", "period": "5"}, ...]
-            scan_interval: 扫描间隔（秒）
+            scan_interval: 股票预警扫描间隔（秒）
+            gold_tasks: 黄金预警任务列表
+            gold_scan_interval: 黄金预警扫描间隔（秒）
         """
         self.tasks = []
         self.data_fetchers = {}
         
         if scan_interval:
             self.scan_interval = scan_interval
+        if gold_scan_interval:
+            self.gold_scan_interval = max(1, int(gold_scan_interval))
         
+        enabled_tasks = [t for t in (tasks or []) if bool(t.get('enabled', True))]
+
         # 提取所有 symbol
-        target_symbols = list(set([t['symbol'] for t in tasks]))
+        target_symbols = list(set([t['symbol'] for t in enabled_tasks]))
         
         # 使用全局名称管理器单例（确保缓存已有对应symbol）
         self.name_manager = StockNameManager.get_instance()
@@ -153,7 +175,7 @@ class AlertEngine:
         
         # 按 symbol + period 去重创建数据获取器
         unique_keys = set()
-        for task in tasks:
+        for task in enabled_tasks:
             key = (task['symbol'], task.get('period', '5'))
             unique_keys.add(key)
         
@@ -173,7 +195,7 @@ class AlertEngine:
             }
             
             # 涨跌停预警使用更快的轮询
-            for t in tasks:
+            for t in enabled_tasks:
                 if t['symbol'] == symbol and t.get('strategy') == 'LIMIT_BOARD_WARNING':
                     self.data_fetchers[key]['interval'] = 1
                     
@@ -182,7 +204,7 @@ class AlertEngine:
 
         # 创建任务
         seen_tasks = set()
-        for task in tasks:
+        for task in enabled_tasks:
             task_id = (task['symbol'], task['strategy'], task.get('period', '5'))
             
             if task_id in seen_tasks:
@@ -201,8 +223,48 @@ class AlertEngine:
                 'last_time': None,
                 'position': 0
             })
+
+        # 黄金价格预警任务
+        self.gold_tasks = []
+        for task in (gold_tasks or []):
+            target = str(task.get('target', '')).strip()
+            if not target:
+                continue
+            try:
+                price = float(task.get('price', 0) or 0)
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+            try:
+                frequency = int(task.get('frequency', 0) or 0)
+            except Exception:
+                frequency = 0
+            enabled = bool(task.get('enabled', True))
+            config = {
+                'target': target,
+                'price': price,
+                'frequency': max(0, frequency),
+                'enabled': enabled,
+            }
+            self.gold_tasks.append({
+                'config': config,
+                'active': enabled,
+                'auto_rearm': False,
+                'next_rearm_time': 0.0,
+            })
         
-        self.logger.info(f"预警任务更新完成，共 {len(self.tasks)} 个任务")
+        self._gold_last_scan_time = 0.0
+        self.logger.info(f"预警任务更新完成，股票任务 {len(self.tasks)} 个，黄金任务 {len(self.gold_tasks)} 个")
+
+    def get_gold_tasks_snapshot(self) -> List[Dict[str, Any]]:
+        """获取黄金任务当前运行状态快照（用于界面刷新）"""
+        result: List[Dict[str, Any]] = []
+        for task in self.gold_tasks:
+            cfg = dict(task.get('config', {}))
+            cfg['enabled'] = bool(task.get('active', cfg.get('enabled', True)))
+            result.append(cfg)
+        return result
 
     def reload_strategies(self) -> bool:
         """重载策略文件"""
@@ -225,7 +287,7 @@ class AlertEngine:
         if self._running:
             return
         
-        if not self.tasks:
+        if not self.tasks and not self.gold_tasks:
             self.logger.info("没有预警任务，跳过启动")
             return
         
@@ -238,10 +300,18 @@ class AlertEngine:
         # 发送启动消息（包含当前状态）
         is_trading = self.scheduler.is_trading_time()
         if is_trading:
-            start_msg = f"【系统启动】\n智能监控已启动\n当前状态: 交易中\n监控标的数: {len(self.data_fetchers)}\n策略任务数: {len(self.tasks)}"
+            start_msg = (
+                f"【系统启动】\n智能监控已启动\n当前状态: 交易中\n"
+                f"股票监控标的数: {len(self.data_fetchers)}\n股票策略任务数: {len(self.tasks)}\n"
+                f"黄金预警任务数: {len(self.gold_tasks)}"
+            )
         else:
             sleep_sec, reason, target_time = self.scheduler.calculate_sleep_seconds()
-            start_msg = f"【系统启动】\n智能监控已启动\n当前状态: 休市\n原因: {reason}\n预计开盘: {target_time}\n监控标的数: {len(self.data_fetchers)}\n策略任务数: {len(self.tasks)}"
+            start_msg = (
+                f"【系统启动】\n智能监控已启动\n当前状态: 休市\n原因: {reason}\n预计开盘: {target_time}\n"
+                f"股票监控标的数: {len(self.data_fetchers)}\n股票策略任务数: {len(self.tasks)}\n"
+                f"黄金预警任务数: {len(self.gold_tasks)}"
+            )
         
         self.logger.info(start_msg.replace('\n', ' '))
         if self.notifier:
@@ -294,7 +364,7 @@ class AlertEngine:
                 
                 was_in_trading = is_trading
                 
-                if not is_trading:
+                if not is_trading and not self.gold_tasks:
                     # 非交易时间，休眠等待
                     sleep_sec, _, _ = self.scheduler.calculate_sleep_seconds()
                     # 分段休眠，以便能够响应停止信号
@@ -303,25 +373,30 @@ class AlertEngine:
                             return
                     continue
                 
-                # 执行一轮扫描
-                self._scan_once()
-                
-                # 休眠
-                for _ in range(self.scan_interval):
-                    if not self._running or self._stop_event.wait(timeout=1):
-                        return
+                # 执行一轮扫描：股票仅在交易时段，黄金按自身间隔执行
+                self._scan_once(is_trading)
+
+                # 统一按 1 秒节拍循环，具体频率由各任务内部 interval 控制
+                if not self._running or self._stop_event.wait(timeout=1):
+                    return
                     
             except Exception as e:
                 self.logger.error(f"预警循环异常: {e}")
                 if self._stop_event.wait(timeout=5):
                     return
 
-    def _scan_once(self):
+    def _scan_once(self, is_trading: bool = True):
         """执行一轮扫描"""
-        if not self.tasks:
+        if not self.tasks and not self.gold_tasks:
             return
         
         current_time = time.time()
+
+        # 黄金价格预警（不依赖 A 股交易时段）
+        self._scan_gold_alerts(current_time)
+
+        if not is_trading or not self.tasks:
+            return
         
         # 阶段1: 获取数据
         for key, fetcher_info in self.data_fetchers.items():
@@ -385,6 +460,112 @@ class AlertEngine:
                     
             except Exception as e:
                 self.logger.warning(f"策略执行失败 {task['config']}: {e}")
+
+    def _scan_gold_alerts(self, current_time: float) -> None:
+        """执行黄金价格预警扫描"""
+        if not self.gold_tasks:
+            return
+
+        # 检查黄金预警时间窗口：周一6:00 - 周六4:45
+        is_in_gold_time_window = self.scheduler.is_gold_alert_time()
+        
+        # 如果不在时间窗口内，强制暂停所有活跃的黄金任务
+        if not is_in_gold_time_window:
+            # 检查是否有任务需要暂停
+            has_active_tasks = any(task.get('active', False) for task in self.gold_tasks)
+            if has_active_tasks:
+                for task in self.gold_tasks:
+                    if task.get('active', False):
+                        task['active'] = False
+                        task['auto_rearm'] = False
+                        task['next_rearm_time'] = 0.0
+                        cfg = task.get('config', {})
+                        cfg['enabled'] = False
+                
+                # 记录暂停信息
+                now_str = self.scheduler.get_now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.info(f"黄金预警时间窗口外 ({now_str})，已暂停所有黄金预警任务")
+            
+            # 时间窗口外不执行扫描
+            return
+
+        if (current_time - self._gold_last_scan_time) < max(1, int(self.gold_scan_interval)):
+            return
+        self._gold_last_scan_time = current_time
+
+        # 自动重启已到期任务
+        for task in self.gold_tasks:
+            if task.get('active', False):
+                continue
+            if not task.get('auto_rearm', False):
+                continue
+            if current_time >= float(task.get('next_rearm_time', 0.0)):
+                task['active'] = True
+                task['auto_rearm'] = False
+                task['next_rearm_time'] = 0.0
+                task['config']['enabled'] = True
+
+        active_targets = {
+            task['config']['target']
+            for task in self.gold_tasks
+            if task.get('active', False)
+        }
+        if not active_targets:
+            return
+
+        try:
+            quotes = self.gold_fetcher.fetch(self._gold_target_names, list(active_targets))
+        except Exception as e:
+            self.logger.warning(f"黄金预警行情获取失败: {e}")
+            return
+
+        quote_map = {q.key: q for q in quotes}
+        for task in self.gold_tasks:
+            if not task.get('active', False):
+                continue
+            cfg = task.get('config', {})
+            target = cfg.get('target', '')
+            quote = quote_map.get(target)
+            if quote is None:
+                continue
+
+            threshold = float(cfg.get('price', 0) or 0)
+            if threshold <= 0:
+                continue
+            current_price = float(quote.last_price)
+
+            # 达到阈值即触发
+            if current_price < threshold:
+                continue
+
+            freq_min = int(cfg.get('frequency', 0) or 0)
+            target_name = self._gold_target_names.get(target, target)
+            msg = (
+                f"【黄金价格预警】\n"
+                f"标的: {target_name}({target})\n"
+                f"当前价格: {current_price:.4f}\n"
+                f"预警价格: {threshold:.4f}\n"
+                f"频率: {freq_min} 分钟"
+            )
+            self.logger.info(f"触发黄金预警: {target} 当前 {current_price} 阈值 {threshold}")
+            if self.notifier:
+                self.notifier.send(msg)
+            if self.on_signal:
+                try:
+                    self.on_signal(target, 'GOLD_PRICE_ALERT', 'TRIGGER', msg)
+                except Exception as e:
+                    self.logger.warning(f"黄金预警回调失败: {e}")
+
+            if freq_min <= 0:
+                task['active'] = False
+                task['auto_rearm'] = False
+                task['next_rearm_time'] = 0.0
+                cfg['enabled'] = False
+            else:
+                task['active'] = False
+                task['auto_rearm'] = True
+                task['next_rearm_time'] = current_time + (freq_min * 60)
+                cfg['enabled'] = False
 
     def _handle_signal(self, task: Dict, signal: str):
         """处理信号"""

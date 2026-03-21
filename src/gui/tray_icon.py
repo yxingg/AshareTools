@@ -25,6 +25,7 @@ class SystemTrayIcon(QSystemTrayIcon):
         self,
         app: QApplication,
         quote_manager,
+        gold_manager,
         alert_engine,
         settings_manager,
         parent=None
@@ -33,6 +34,7 @@ class SystemTrayIcon(QSystemTrayIcon):
         
         self.app = app
         self.quote_manager = quote_manager
+        self.gold_manager = gold_manager
         self.alert_engine = alert_engine
         self.settings_manager = settings_manager
         self.scheduler = TradingScheduler()
@@ -53,14 +55,16 @@ class SystemTrayIcon(QSystemTrayIcon):
         self.schedule_timer.start()
         
         # 状态
-        self._manually_shown = False  # 是否手动打开了窗口
         self._last_period_state = None  # 上一次的时间段状态 (True=在时间段内, False=不在)
+        self._last_gold_period_states = {}  # 黄金上一次每个标的是否在时间段内
         
         # 初始化窗口显示状态
         if self.settings_manager.get_time_schedule_enabled():
             self._check_time_schedule()
         elif self.settings_manager.get_quote_enabled():
             self.quote_manager.show_windows()
+
+        self._check_gold_time_schedule()
         
         # 显示
         self.show()
@@ -168,6 +172,7 @@ class SystemTrayIcon(QSystemTrayIcon):
         if self.main_window is None:
             self.main_window = MainWindow(
                 self.quote_manager,
+                self.gold_manager,
                 self.alert_engine,
                 self.settings_manager
             )
@@ -181,7 +186,7 @@ class SystemTrayIcon(QSystemTrayIcon):
 
     def _sync_menu_from_settings(self):
         """从设置同步菜单状态"""
-        self.show_quote_action.setChecked(self.settings_manager.get_quote_enabled())
+        self._sync_quote_state(self.quote_manager.is_visible(), persist=False)
         self.enable_alert_action.setChecked(self.settings_manager.get_alert_enabled())
         
         schedule_enabled = self.settings_manager.get_time_schedule_enabled()
@@ -190,6 +195,16 @@ class SystemTrayIcon(QSystemTrayIcon):
         if schedule_enabled:
             # 如果通过设置启用了定时显示，立即检查
             self._check_time_schedule()
+        else:
+            self._check_gold_time_schedule()
+
+    def _sync_quote_state(self, visible: bool, persist: bool = True) -> None:
+        """将行情窗口真实状态同步到托盘、配置与主窗口。"""
+        self.show_quote_action.setChecked(bool(visible))
+        if persist:
+            self.settings_manager.set_quote_enabled(bool(visible))
+        if self.main_window:
+            self.main_window.enable_quote_check.setChecked(bool(visible))
 
     def _toggle_quote_window(self, checked=None):
         """切换行情窗口显示"""
@@ -198,13 +213,8 @@ class SystemTrayIcon(QSystemTrayIcon):
         
         if checked:
             self.quote_manager.show_windows()
-            self._manually_shown = True
         else:
             self.quote_manager.hide_windows()
-            self._manually_shown = False
-        
-        self.show_quote_action.setChecked(checked)
-        self.settings_manager.set_quote_enabled(checked)
 
     def _toggle_time_schedule(self, checked):
         """切换定时显示"""
@@ -215,7 +225,12 @@ class SystemTrayIcon(QSystemTrayIcon):
             self._check_time_schedule()
 
     def _check_time_schedule(self):
-        """检查时间段"""
+        """检查时间段（股票+黄金）"""
+        self._check_quote_time_schedule()
+        self._check_gold_time_schedule()
+
+    def _check_quote_time_schedule(self):
+        """检查股票时间段"""
         if not self.settings_manager.get_time_schedule_enabled():
             self._last_period_state = None
             return
@@ -228,27 +243,69 @@ class SystemTrayIcon(QSystemTrayIcon):
             if in_period:
                 # 进入时间段 -> 打开窗口
                 self.quote_manager.show_windows()
-                self.show_quote_action.setChecked(True)
-                # 同步更新设置窗口状态
-                if self.main_window and self.main_window.isVisible():
-                    self.main_window.enable_quote_check.setChecked(True)
             else:
                 # 离开时间段 -> 关闭窗口
                 self.quote_manager.hide_windows()
-                self.show_quote_action.setChecked(False)
-                # 同步更新设置窗口状态
-                if self.main_window and self.main_window.isVisible():
-                    self.main_window.enable_quote_check.setChecked(False)
             
             # 更新状态
             self._last_period_state = in_period
+
+    def _check_gold_time_schedule(self):
+        """检查黄金按标的时间段"""
+        # 全局定时关闭时，完全不接管各标的显隐
+        if not self.settings_manager.get_gold_time_schedule_enabled():
+            self._last_gold_period_states = {}
+            self._sync_gold_switches_if_open()
+            return
+
+        symbol_periods = self.settings_manager.get_gold_symbol_periods()
+        all_keys = [t.get('key', '') for t in self.gold_manager.targets if t.get('key')]
+        managed_keys = [k for k in all_keys if symbol_periods.get(k)]
+
+        if not managed_keys:
+            self._last_gold_period_states = {}
+            self._sync_gold_switches_if_open()
+            return
+
+        current_states = {}
+        for key in managed_keys:
+            periods = symbol_periods.get(key, [])
+            in_period = self.scheduler.is_in_time_period(periods)
+            current_states[key] = in_period
+
+            prev_state = self._last_gold_period_states.get(key)
+            if prev_state is None:
+                # 初次观察只记录状态，不做强制显隐
+                continue
+
+            if prev_state != in_period:
+                # 仅在时间段切换时刻强制转换显隐
+                self.gold_manager.set_target_visible_state(key, in_period, persist=True)
+
+        self._last_gold_period_states = current_states
+        self.settings_manager.set_gold_enabled(bool(self.gold_manager.get_visible_keys()))
+        self._sync_gold_switches_if_open()
+
+    def _sync_gold_switches_if_open(self):
+        """主窗口打开时，同步黄金标的开关与实际窗口显示状态"""
+        if self.main_window and self.main_window.isVisible():
+            self.main_window.sync_gold_target_switches_with_visibility()
 
     def _toggle_alert(self, checked):
         """切换预警功能"""
         if checked:
             tasks = self.settings_manager.get_alert_tasks()
             scan_interval = self.settings_manager.get_alert_scan_interval()
-            self.alert_engine.update_tasks(tasks, scan_interval)
+            gold_tasks = self.settings_manager.get_gold_alert_tasks()
+            gold_scan_interval = self.settings_manager.get_gold_alert_scan_interval()
+            self.alert_engine.update_tasks(
+                tasks,
+                scan_interval,
+                gold_tasks=gold_tasks,
+                gold_scan_interval=gold_scan_interval,
+            )
+            self.quote_manager.set_alert_polling_config(tasks, scan_interval)
+            self.gold_manager.set_alert_polling_config(gold_tasks, gold_scan_interval)
             
             # 更新钉钉配置
             dingtalk = self.settings_manager.get_dingtalk_config()
@@ -261,12 +318,15 @@ class SystemTrayIcon(QSystemTrayIcon):
             self.alert_engine.start()
         else:
             self.alert_engine.stop()
+            self.quote_manager.set_alert_polling_config([], self.settings_manager.get_alert_scan_interval())
+            self.gold_manager.set_alert_polling_config([], self.settings_manager.get_gold_alert_scan_interval())
         
         self.settings_manager.set_alert_enabled(checked)
 
     def _quit(self):
         """退出程序"""
         self.quote_manager.stop()
+        self.gold_manager.stop()
         self.alert_engine.stop()
         self.settings_manager.save()
         if self.main_window:

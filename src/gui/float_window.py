@@ -47,8 +47,9 @@ class StockFloatWindow(QWidget):
         self._always_on_top = True  # 单窗口置顶设置
         self._initializing = True  # 标志：初始化中不同步设置
 
-        self.table = QTableWidget(1, COLUMN_COUNT, self)
-        self.table.setHorizontalHeaderLabels(COLUMN_HEADERS)
+        headers = self._column_headers()
+        self.table = QTableWidget(1, len(headers), self)
+        self.table.setHorizontalHeaderLabels(headers)
         self.table.setVerticalHeaderLabels([""])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -112,13 +113,22 @@ class StockFloatWindow(QWidget):
         self.table.horizontalHeader().setFont(header_font)
         self.table.horizontalHeader().setVisible(config["show_column_header"])
 
-        self.table.setColumnHidden(0, not config["show_name"])
-        self.table.setColumnHidden(1, not config["show_code"])
+        uses_name_code_columns = getattr(self.manager, "uses_name_code_columns", True)
+        if uses_name_code_columns:
+            if self.table.columnCount() > 0:
+                self.table.setColumnHidden(0, not config.get("show_name", True))
+            if self.table.columnCount() > 1:
+                self.table.setColumnHidden(1, not config.get("show_code", True))
+        else:
+            code_column_index = getattr(self.manager, "code_column_index", None)
+            if isinstance(code_column_index, int) and 0 <= code_column_index < self.table.columnCount():
+                self.table.setColumnHidden(code_column_index, not config.get("show_code", True))
 
-        unit = self.manager.code_settings.get(self.code, {}).get("volume_unit", 100)
-        self.table.setColumnHidden(5, unit == 0)
+        if self.table.columnCount() > 5 and not getattr(self.manager, "disable_volume_column", False):
+            unit = self.manager.code_settings.get(self.code, {}).get("volume_unit", 100)
+            self.table.setColumnHidden(5, unit == 0)
 
-        for index, width in enumerate(config["column_widths"]):
+        for index, width in enumerate(config["column_widths"][: self.table.columnCount()]):
             self.table.setColumnWidth(index, width)
 
         self.table.setRowHeight(0, config["row_height"])
@@ -137,24 +147,32 @@ class StockFloatWindow(QWidget):
         """更新行情数据"""
         self.quote = quote
         if quote:
-            values = quote.as_row()
-            unit = self.manager.code_settings.get(self.code, {}).get("volume_unit", 100)
-            if unit > 0 and (quote.bid1_volume > 0 or quote.ask1_volume > 0):
-                divisor = unit * 100
-                ask_display = quote.ask1_volume / divisor
-                bid_display = quote.bid1_volume / divisor
-                
-                def fmt(v: float) -> str:
-                    s = f"{v:.2f}"
-                    if s.endswith("0"):
-                        s = s.rstrip("0").rstrip(".")
-                    return s
+            values = list(quote.as_row())
+            if self.table.columnCount() > len(values):
+                if self.table.columnCount() == 6 and not getattr(self.manager, "disable_volume_column", False):
+                    unit = self.manager.code_settings.get(self.code, {}).get("volume_unit", 100)
+                    if unit > 0 and (quote.bid1_volume > 0 or quote.ask1_volume > 0):
+                        divisor = unit * 100
+                        ask_display = quote.ask1_volume / divisor
+                        bid_display = quote.bid1_volume / divisor
 
-                values.append(f"{fmt(ask_display)}/{fmt(bid_display)}")
-            else:
-                values.append("--")
+                        def fmt(v: float) -> str:
+                            s = f"{v:.2f}"
+                            if s.endswith("0"):
+                                s = s.rstrip("0").rstrip(".")
+                            return s
+
+                        values.append(f"{fmt(ask_display)}/{fmt(bid_display)}")
+                    else:
+                        values.append("--")
+                while len(values) < self.table.columnCount():
+                    values.append("--")
+            elif len(values) > self.table.columnCount():
+                values = values[: self.table.columnCount()]
         else:
-            values = ["--", self.code, "--", "--", "--", "--"]
+            values = ["--"] * self.table.columnCount()
+            if self.table.columnCount() > 1:
+                values[-1] = self.code
 
         for col, value in enumerate(values):
             item = self.table.item(0, col)
@@ -168,6 +186,14 @@ class StockFloatWindow(QWidget):
             item.setForeground(QBrush(self._color_for_quote(quote)))
         self.setWindowTitle(values[0] if values[0] and values[0] != "--" else self.code)
         self.update()  # 半透明窗口需要显式触发重绘
+
+    def _column_headers(self) -> List[str]:
+        provider = getattr(self.manager, "get_column_headers", None)
+        if callable(provider):
+            headers = provider()
+            if headers:
+                return list(headers)
+        return list(COLUMN_HEADERS)
 
     def _color_for_quote(self, quote) -> QColor:
         """根据涨跌返回颜色"""
@@ -200,7 +226,7 @@ class StockFloatWindow(QWidget):
         self.manager.sync_from_window(self)
 
     def get_column_widths(self) -> List[int]:
-        return [self.table.columnWidth(i) for i in range(COLUMN_COUNT)]
+        return [self.table.columnWidth(i) for i in range(self.table.columnCount())]
 
     def get_row_height(self) -> int:
         return self.table.rowHeight(0)

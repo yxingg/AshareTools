@@ -20,6 +20,9 @@ from .utils import normalize_stock_code, split_text, get_market_prefix
 logger = logging.getLogger(__name__)
 
 
+OZ_TO_GRAM = 31.1034768
+
+
 # ==========================================
 # 代理屏蔽补丁
 # ==========================================
@@ -302,6 +305,288 @@ class QuoteFetcher:
         except (ValueError, IndexError) as e:
             logger.debug(f"解析报价失败 {key}: {e}")
             return None
+
+
+@dataclasses.dataclass(slots=True)
+class GoldQuote:
+    """黄金实时报价（仅展示最新价）"""
+
+    key: str
+    code: str
+    name: str
+    last_price: float
+    prev_close: float
+    bid1_volume: float = 0.0
+    ask1_volume: float = 0.0
+
+    @property
+    def change(self) -> float:
+        return self.last_price - self.prev_close
+
+    @property
+    def change_percent(self) -> float:
+        if self.prev_close == 0:
+            return 0.0
+        return (self.change / self.prev_close) * 100.0
+
+    def as_row(self) -> List[str]:
+        price_text = self._fmt_price(self.last_price)
+        change_pct = _trim_formatted(f"{self.change_percent:+.2f}%", "%")
+        return [self.code, price_text, change_pct]
+
+    @staticmethod
+    def _fmt_price(value: float) -> str:
+        if value >= 1000:
+            text = f"{value:.2f}"
+        elif value >= 100:
+            text = f"{value:.3f}"
+        else:
+            text = f"{value:.4f}"
+        return _trim_formatted(text)
+
+
+class GoldQuoteFetcher:
+    """黄金行情获取器
+    - 伦敦金(XAU)/纽约金(GC)/美元汇率：新浪接口
+    - AU9999：东方财富 suggest + push2 接口
+    """
+
+    # ---- 新浪接口 ----
+    _SINA_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.sina.com.cn",
+    }
+    # hf_XAU=伦敦现货金, hf_GC=纽约期货金, fx_susdcnh=美元/离岸人民币
+    _SINA_URL = "http://hq.sinajs.cn/list=hf_XAU,hf_GC,fx_susdcnh"
+
+    # ---- 东方财富接口（仅用于 AU9999）----
+    _EM_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com",
+    }
+    _EM_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"
+    _EM_SEARCH_URL = "https://searchapi.eastmoney.com/api/suggest/get"
+    _EM_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
+    _EM_FIELDS = "f43,f58,f59,f60"
+    _EM_AU9999_DEFAULT_SECID = "118.AU9999"
+
+    def __init__(self) -> None:
+        self._sina_session = requests.Session()
+        self._sina_session.headers.update(self._SINA_HEADERS)
+        self._sina_session.trust_env = False
+
+        self._em_session = requests.Session()
+        self._em_session.headers.update(self._EM_HEADERS)
+        self._em_session.trust_env = False
+
+        self._au9999_secid: Optional[str] = None
+
+    def fetch(self, target_names: Dict[str, str], enabled_keys: Sequence[str]) -> List[GoldQuote]:
+        """获取黄金目标最新价"""
+        enabled = [k for k in enabled_keys if k]
+        if not enabled:
+            return []
+
+        real_targets = set(enabled)
+        if "london_spot_rmb" in real_targets:
+            real_targets.add("london_spot")
+            real_targets.add("usd_cny")
+
+        need_sina = real_targets & {"london_spot", "usd_cny", "ny_gold"}
+        need_au9999 = "au9999" in real_targets
+
+        # 批量获取新浪行情
+        sina_data: Dict[str, Dict[str, Any]] = {}
+        if need_sina:
+            try:
+                sina_data = self._fetch_sina()
+            except Exception as exc:
+                logger.warning("新浪黄金行情获取失败: %s", exc)
+
+        # 单独获取 AU9999（东方财富）
+        au9999_data: Optional[Dict[str, Any]] = None
+        if need_au9999:
+            try:
+                au9999_data = self._fetch_au9999()
+            except Exception as exc:
+                logger.warning("东财 AU9999 行情获取失败: %s", exc)
+
+        # 组合成 GoldQuote 列表
+        _sina_key_map = {
+            "london_spot": "hf_XAU",
+            "usd_cny": "fx_susdcnh",
+            "ny_gold": "hf_GC",
+        }
+        chosen: Dict[str, Dict[str, Any]] = {}
+        quotes: List[GoldQuote] = []
+
+        for key in ("london_spot", "usd_cny", "ny_gold", "au9999"):
+            if key not in real_targets:
+                continue
+            if key == "au9999":
+                data = au9999_data
+            else:
+                sina_symbol = _sina_key_map[key]
+                data = sina_data.get(sina_symbol)
+
+            if not data:
+                continue
+            chosen[key] = data
+
+            if key in enabled:
+                last = data.get("last", 0.0)
+                prev = data.get("prev", last)
+                if last <= 0:
+                    continue
+                quotes.append(
+                    GoldQuote(
+                        key=key,
+                        code=data.get("display_code", key),
+                        name=target_names.get(key, key),
+                        last_price=last,
+                        prev_close=prev if prev > 0 else last,
+                    )
+                )
+
+        if "london_spot_rmb" in enabled:
+            conv_quote = self._build_london_rmb_quote(target_names, chosen)
+            if conv_quote:
+                quotes.append(conv_quote)
+
+        return quotes
+
+    def _fetch_sina(self) -> Dict[str, Dict[str, Any]]:
+        """批量获取新浪黄金/外汇行情，返回 {sina_symbol: {last, prev, display_code}}"""
+        resp = self._sina_session.get(self._SINA_URL, timeout=5)
+        resp.raise_for_status()
+        resp.encoding = "gbk"
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for line in resp.text.strip().split(";"):
+            line = line.strip()
+            if "=" not in line:
+                continue
+            var_name, _, raw = line.partition("=")
+            var_name = var_name.strip()
+            raw = raw.strip().strip('"')
+            if not raw:
+                continue
+            parts = raw.split(",")
+
+            if "hf_XAU" in var_name:
+                # 伦敦现货金格式：[0]=当前价, [1]=昨收, [4]=今高, [5]=今低
+                last = self._safe_float(parts[0])
+                prev = self._safe_float(parts[1]) if len(parts) > 1 else 0.0
+                if prev <= 0:
+                    prev = last
+                result["hf_XAU"] = {"last": last, "prev": prev, "display_code": "XAU"}
+
+            elif "hf_GC" in var_name:
+                # 纽约期货金格式：[0]=当前价, [7]=昨收, [4]=今高, [5]=今低
+                last = self._safe_float(parts[0])
+                prev = self._safe_float(parts[7]) if len(parts) > 7 else 0.0
+                if prev <= 0:
+                    prev = last
+                result["hf_GC"] = {"last": last, "prev": prev, "display_code": "GC"}
+
+            elif "fx_susdcnh" in var_name:
+                # 离岸人民币格式：[8]=当前价（首选）或 [1]（备用）, [3]=昨收
+                last = 0.0
+                if len(parts) > 8 and "." in parts[8]:
+                    last = self._safe_float(parts[8])
+                if last <= 0 and len(parts) > 1:
+                    last = self._safe_float(parts[1])
+                prev = self._safe_float(parts[3]) if len(parts) > 3 else 0.0
+                if prev <= 0:
+                    prev = last
+                result["fx_susdcnh"] = {"last": last, "prev": prev, "display_code": "USDCNH"}
+
+        return result
+
+    def _fetch_au9999(self) -> Optional[Dict[str, Any]]:
+        """东方财富接口获取 AU9999 实时行情"""
+        # Step 1: 动态解析 secid（带缓存）
+        if not self._au9999_secid:
+            try:
+                params = {"input": "AU9999", "type": "14", "token": self._EM_TOKEN}
+                resp = self._em_session.get(self._EM_SEARCH_URL, params=params, timeout=5)
+                resp.raise_for_status()
+                quote_list = resp.json().get("QuotationCodeTable", {}).get("Data", [])
+                if quote_list:
+                    self._au9999_secid = str(quote_list[0].get("QuoteID", "")).strip() or None
+            except Exception:
+                pass
+            if not self._au9999_secid:
+                self._au9999_secid = self._EM_AU9999_DEFAULT_SECID
+
+        # Step 2: 获取实时报价
+        params = {"secid": self._au9999_secid, "fields": self._EM_FIELDS}
+        resp = self._em_session.get(self._EM_QUOTE_URL, params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        if not data:
+            return None
+
+        f59 = data.get("f59", 2)
+        try:
+            scale = 10 ** int(f59)
+        except Exception:
+            scale = 100
+
+        last = self._safe_parse_scaled(data.get("f43", "-"), scale)
+        if last <= 0:
+            return None
+        prev = self._safe_parse_scaled(data.get("f60", "-"), scale)
+        if prev <= 0:
+            prev = last
+
+        return {"last": last, "prev": prev, "display_code": "AU9999"}
+
+    @staticmethod
+    def _safe_float(s: str) -> float:
+        try:
+            v = float(s)
+            return v if v > 0 else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def _safe_parse_scaled(raw_value: Any, scale: int) -> float:
+        if raw_value in (None, "", "-"):
+            return 0.0
+        try:
+            return float(raw_value) / float(scale)
+        except Exception:
+            return 0.0
+
+    def _build_london_rmb_quote(
+        self,
+        target_names: Dict[str, str],
+        chosen: Dict[str, Dict[str, Any]],
+    ) -> Optional[GoldQuote]:
+        london = chosen.get("london_spot")
+        usd_cny = chosen.get("usd_cny")
+        if not london or not usd_cny:
+            return None
+
+        london_last = london.get("last", 0.0)
+        usd_last = usd_cny.get("last", 0.0)
+        if london_last <= 0 or usd_last <= 0:
+            return None
+
+        london_prev = london.get("prev", london_last)
+        usd_prev = usd_cny.get("prev", usd_last)
+
+        last_rmb_per_g = (london_last * usd_last) / OZ_TO_GRAM
+        prev_rmb_per_g = (london_prev * usd_prev) / OZ_TO_GRAM if london_prev > 0 and usd_prev > 0 else last_rmb_per_g
+
+        return GoldQuote(
+            key="london_spot_rmb",
+            code="XAU*CNH",
+            name=target_names.get("london_spot_rmb", "伦敦金现（RMB/g）"),
+            last_price=last_rmb_per_g,
+            prev_close=prev_rmb_per_g,
+        )
 
 
 # ==========================================

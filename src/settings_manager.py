@@ -3,6 +3,7 @@
 
 import json
 import logging
+from copy import deepcopy
 from typing import Dict, List, Any
 
 from .config import SETTINGS_PATH
@@ -54,6 +55,11 @@ class SettingsManager:
         if 'alert' not in self._settings:
             self._settings['alert'] = DEFAULT_SETTINGS['alert'].copy()
 
+    def _ensure_gold_window(self):
+        """确保 gold_window 配置存在"""
+        if 'gold_window' not in self._settings:
+            self._settings['gold_window'] = deepcopy(DEFAULT_SETTINGS['gold_window'])
+
     # ===== 行情窗口配置 =====
     
     def get_quote_config(self) -> Dict:
@@ -88,6 +94,71 @@ class SettingsManager:
         """设置行情窗口股票列表"""
         self._ensure_quote_window()
         self._settings['quote_window']['stocks'] = stocks
+        self._dirty = True
+
+    # ===== 黄金行情窗口配置 =====
+
+    def get_gold_config(self) -> Dict:
+        """获取黄金行情窗口配置"""
+        self._ensure_gold_window()
+        return self._settings['gold_window']
+
+    def set_gold_config(self, config: Dict):
+        """设置黄金行情窗口配置"""
+        self._ensure_gold_window()
+        self._settings['gold_window'].update(config)
+        self._dirty = True
+
+    def get_gold_enabled(self) -> bool:
+        """获取黄金行情窗口是否启用"""
+        self._ensure_gold_window()
+        return self._settings['gold_window'].get('enabled', False)
+
+    def set_gold_enabled(self, enabled: bool):
+        """设置黄金行情窗口是否启用"""
+        self._ensure_gold_window()
+        self._settings['gold_window']['enabled'] = enabled
+        self._dirty = True
+
+    def get_gold_targets(self) -> List[Dict]:
+        """获取黄金监控标的列表"""
+        self._ensure_gold_window()
+        targets = self._settings['gold_window'].get('targets', [])
+        return deepcopy(targets)
+
+    def set_gold_targets(self, targets: List[Dict]):
+        """设置黄金监控标的列表"""
+        self._ensure_gold_window()
+        self._settings['gold_window']['targets'] = deepcopy(targets)
+        self._dirty = True
+
+    def get_gold_time_schedule_enabled(self) -> bool:
+        """获取黄金定时显示是否启用"""
+        self._ensure_gold_window()
+        schedule = self._settings['gold_window'].get('time_schedule', {})
+        return schedule.get('enabled', False)
+
+    def set_gold_time_schedule_enabled(self, enabled: bool):
+        """设置黄金定时显示是否启用"""
+        self._ensure_gold_window()
+        if 'time_schedule' not in self._settings['gold_window']:
+            self._settings['gold_window']['time_schedule'] = {}
+        self._settings['gold_window']['time_schedule']['enabled'] = enabled
+        self._dirty = True
+
+    def get_gold_symbol_periods(self) -> Dict[str, List[Dict]]:
+        """获取黄金各标的定时显示时间段"""
+        self._ensure_gold_window()
+        schedule = self._settings['gold_window'].get('time_schedule', {})
+        periods = schedule.get('symbol_periods', {})
+        return deepcopy(periods)
+
+    def set_gold_symbol_periods(self, symbol_periods: Dict[str, List[Dict]]):
+        """设置黄金各标的定时显示时间段"""
+        self._ensure_gold_window()
+        if 'time_schedule' not in self._settings['gold_window']:
+            self._settings['gold_window']['time_schedule'] = {}
+        self._settings['gold_window']['time_schedule']['symbol_periods'] = deepcopy(symbol_periods)
         self._dirty = True
 
     # ===== 时间段配置 =====
@@ -168,6 +239,30 @@ class SettingsManager:
         self._dirty = True
         self.save()
 
+    def get_gold_alert_tasks(self) -> List[Dict]:
+        """获取黄金预警任务列表"""
+        self._ensure_alert()
+        return deepcopy(self._settings['alert'].get('gold_tasks', []))
+
+    def set_gold_alert_tasks(self, tasks: List[Dict]):
+        """设置黄金预警任务列表"""
+        self._ensure_alert()
+        self._settings['alert']['gold_tasks'] = deepcopy(tasks)
+        self._dirty = True
+        self.save()
+
+    def get_gold_alert_scan_interval(self) -> int:
+        """获取黄金预警扫描间隔（秒）"""
+        self._ensure_alert()
+        return int(self._settings['alert'].get('gold_scan_interval', 20))
+
+    def set_gold_alert_scan_interval(self, interval: int):
+        """设置黄金预警扫描间隔（秒）"""
+        self._ensure_alert()
+        self._settings['alert']['gold_scan_interval'] = int(interval)
+        self._dirty = True
+        self.save()
+
     def get_dingtalk_config(self) -> Dict:
         """获取钉钉配置"""
         self._ensure_alert()
@@ -190,5 +285,12 @@ class SettingsManager:
         """更新行情窗口设置"""
         self._ensure_quote_window()
         self._settings['quote_window'].update(settings)
+        self._dirty = True
+        self.save()
+
+    def update_gold_window_settings(self, settings: Dict):
+        """更新黄金行情窗口设置"""
+        self._ensure_gold_window()
+        self._settings['gold_window'].update(settings)
         self._dirty = True
         self.save()
